@@ -1,0 +1,273 @@
+# st2js
+
+Compiles **IEC 61131-3 Structured Text (ST)** to JavaScript. Designed for bringing PLC logic into Node.js applications.
+
+## Installation
+
+```bash
+npm install st2js
+```
+
+## Quick Start
+
+```javascript
+const { compile, parse, validate } = require('st2js');
+
+const stSource = `
+FUNCTION_BLOCK Counter
+  VAR_INPUT EN: BOOL; END_VAR
+  VAR Count: INT := 0; END_VAR
+  IF EN THEN
+    Count := Count + 1;
+  END_IF
+END_FUNCTION_BLOCK
+`;
+
+// Compile ST to JavaScript
+const { code, errors, warnings } = compile(stSource);
+
+if (errors.some(e => e.severity === 'error')) {
+  errors.forEach(e => console.error(`[${e.phase}] line ${e.line}: ${e.message}`));
+} else {
+  console.log(code);
+}
+```
+
+**Generated output:**
+```javascript
+'use strict';
+
+class Counter {
+  constructor() {
+    this.Count = 0; // INT
+  }
+
+  call(EN) {
+    // ST line 5
+    if (EN) {
+      // ST line 6
+      this.Count = (this.Count + 1) | 0;
+    }
+  }
+}
+```
+
+## API Reference
+
+### `compile(source, options?)`
+
+Compiles an ST source string to JavaScript.
+
+**Parameters:**
+- `source: string` — Structured Text source code
+- `options.sourceMaps: boolean` — Include `// ST line N` comments (default: `true`)
+- `options.filename: string` — Source filename for error messages (default: `'<input>'`)
+- `options.strict: boolean` — Fail on warnings (default: `false`)
+
+**Returns:**
+```typescript
+{
+  code: string;          // Generated JavaScript
+  sourceMap: object;     // Source map (file and mappings)
+  warnings: string[];    // Non-fatal warnings from codegen
+  errors: STError[];     // Parse and validation errors
+}
+```
+
+### `compileSync(source, options?)`
+
+Like `compile()` but throws on errors instead of returning them.
+
+```javascript
+const { compileSync } = require('st2js');
+const code = compileSync(stSource); // throws if ST has errors
+```
+
+### `parse(source)`
+
+Tokenizes and parses ST source, returning an AST.
+
+```javascript
+const { parse } = require('st2js');
+const { ast, errors } = parse(stSource);
+```
+
+### `validate(ast)`
+
+Performs semantic validation on a parsed AST.
+
+```javascript
+const { validate } = require('st2js');
+const { valid, errors } = validate(ast);
+```
+
+### Error Object
+
+All error-producing functions return `STError` objects:
+
+```typescript
+{
+  phase: 'lexer' | 'parser' | 'validator';
+  severity: 'error' | 'warning';
+  message: string;
+  line: number;   // 1-based
+  column: number; // 0-based
+  code?: string;  // Optional error code
+}
+```
+
+## Supported ST Constructs
+
+### Program Organization Units (POUs)
+
+| ST Construct | JavaScript Output |
+|---|---|
+| `FUNCTION_BLOCK Foo` | `class Foo { constructor() {...} call(...) {...} }` |
+| `FUNCTION Bar: INT` | `function Bar(...) { let _result = 0; ...; return _result; }` |
+| `PROGRAM Main` | Module with `run()` function and exported variables |
+
+### Variable Declarations
+
+| ST | Description |
+|---|---|
+| `VAR` | Local variables (class members in FB, locals in FUNCTION) |
+| `VAR_INPUT` | Input parameters (passed to `call()` or function) |
+| `VAR_OUTPUT` | Output variables (class members in FB) |
+| `VAR_IN_OUT` | In-out parameters |
+| `VAR_GLOBAL` | Global variable declarations |
+| `CONSTANT` | Constant modifier |
+| `RETAIN` | Retain modifier (noted in comments) |
+
+### Data Types
+
+| ST Type | JavaScript | Notes |
+|---|---|---|
+| `BOOL` | `boolean` | `true`/`false` |
+| `SINT`, `INT`, `DINT`, `LINT` | `number` | Integer with `\| 0` clamping |
+| `USINT`, `UINT`, `UDINT`, `ULINT` | `number` | Unsigned integer |
+| `REAL`, `LREAL` | `number` | IEEE 754 double |
+| `STRING`, `WSTRING` | `string` | JS string |
+| `TIME` | `number` | Milliseconds |
+| `ARRAY[lo..hi] OF T` | `Array` | JS Array |
+| `STRUCT ... END_STRUCT` | `class` | JS class with constructor |
+| User-defined types | `class` | `new TypeName()` |
+
+### Control Flow
+
+```st
+(* IF/ELSIF/ELSE *)
+IF x > 0 THEN
+  y := 1;
+ELSIF x < 0 THEN
+  y := -1;
+ELSE
+  y := 0;
+END_IF
+
+(* CASE *)
+CASE state OF
+  0: output := 10;
+  1, 2: output := 20;
+  3..5: output := 30;
+  ELSE output := 0;
+END_CASE
+
+(* FOR loop *)
+FOR i := 0 TO 9 BY 1 DO
+  sum := sum + arr[i];
+END_FOR
+
+(* WHILE loop *)
+WHILE x > 0 DO
+  x := x - 1;
+END_WHILE
+
+(* REPEAT/UNTIL *)
+REPEAT
+  x := x + 1;
+UNTIL x >= 10
+END_REPEAT
+```
+
+### Standard Function Blocks
+
+The following standard function blocks are available in the runtime:
+
+| FB | Description |
+|---|---|
+| `TON` | Timer On-Delay |
+| `TOF` | Timer Off-Delay |
+| `TP` | Timer Pulse |
+| `RS` | Reset-dominant SR latch |
+| `SR` | Set-dominant SR latch |
+| `CTU` | Counter Up |
+| `CTD` | Counter Down |
+| `CTUD` | Counter Up/Down |
+
+Usage in compiled code:
+```javascript
+// In compiled output
+const { TON, TOF, TP } = require('st2js/src/runtime/TimerBlocks');
+```
+
+### Standard Library Functions
+
+Math: `ABS`, `SQRT`, `LN`, `LOG`, `EXP`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2`
+Numeric: `MAX`, `MIN`, `LIMIT`, `SEL`, `MUX`
+String: `LEN`, `LEFT`, `RIGHT`, `MID`, `CONCAT`, `INSERT`, `DELETE`, `REPLACE`, `FIND`
+Bit: `SHL`, `SHR`, `ROL`, `ROR`
+Type conversions: `INT_TO_REAL`, `REAL_TO_INT`, `BOOL_TO_INT`, etc.
+
+## Using Compiled Output
+
+When a PROGRAM is compiled, it exports a `run()` function and getters for all variables:
+
+```javascript
+// compiled.js
+'use strict';
+const { TON } = require('st2js/src/runtime/TimerBlocks');
+
+let Counter = new MyCounter();
+let Cycles = 0;
+
+function run() { ... }
+module.exports = { run, get Counter() { return Counter; }, get Cycles() { return Cycles; } };
+```
+
+```javascript
+// your app
+const compiled = require('./compiled');
+compiled.run(); // execute one PLC scan cycle
+console.log(compiled.Cycles);
+```
+
+## Building the Parser
+
+The module uses a built-in hand-written parser that requires no additional dependencies.
+
+If you want to regenerate the ANTLR4 grammar (requires Java 11+):
+```bash
+npm run generate-parser
+```
+
+## Running Tests
+
+```bash
+npm test          # Run all tests with coverage
+npm test:unit     # Run unit tests only
+npm test:integration  # Run integration tests only
+```
+
+## Known Limitations
+
+- **REAL division** does not enforce PLC-style saturation semantics
+- **TIME arithmetic** uses JavaScript `Date.now()` for timers; accuracy depends on JS event loop
+- **STRING** functions operate on JS UTF-16 strings, not null-terminated fixed-length arrays
+- **Pointers** and `%I`, `%Q`, `%M` physical address prefixes are not supported
+- **SFC** (Sequential Function Chart) and **LD** (Ladder Diagram) are not supported
+- **Tasks** and **PLC program scheduling** are not modeled
+- ANTLR4 parser generation requires Java 11+ (the built-in parser is used by default)
+
+## License
+
+MIT

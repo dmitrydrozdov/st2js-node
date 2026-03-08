@@ -1,0 +1,55 @@
+{
+  "name": "st2js",
+  "version": "1.0.0",
+  "description": "Compiles IEC 61131-3 Structured Text (ST) to JavaScript",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "require": "./src/index.js",
+      "import": "./src/index.mjs",
+      "default": "./src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "test": "jest --coverage",
+    "test:unit": "jest tests/unit --coverage",
+    "test:integration": "jest tests/integration --coverage",
+    "generate-parser": "bash scripts/generate-parser.sh",
+    "example": "node example/app.js"
+  },
+  "keywords": [
+    "IEC61131",
+    "structured-text",
+    "PLC",
+    "compiler",
+    "javascript"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "source-map": "^0.7.4"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "coverageDirectory": "coverage",
+    "collectCoverageFrom": [
+      "src/**/*.js",
+      "!src/generated/**",
+      "!src/index.mjs"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "lines": 80,
+        "branches": 70,
+        "functions": 80,
+        "statements": 80
+      }
+    }
+  }
+}
