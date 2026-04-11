@@ -102,4 +102,97 @@ function compileSync(source, options = {}) {
   return result.code;
 }
 
-module.exports = { parse, validate, compile, compileSync };
+/**
+ * Parse an ST algorithm (bare statement list) into an AST.
+ *
+ * @param {string} source
+ * @returns {{ ast: import('./types').ASTNode|null, errors: import('./types').STError[] }}
+ */
+function parseAlgorithm(source) {
+  const lexer = new Lexer(source);
+  const tokens = lexer.tokenize();
+  const lexErrors = lexer.errors;
+
+  const parser = new Parser(tokens, source);
+  const cst = parser.parseStatementList();
+  const parseErrors = parser.errors;
+
+  const allErrors = [...lexErrors, ...parseErrors];
+
+  if (parseErrors.some(e => e.severity === 'error')) {
+    return { ast: null, errors: allErrors };
+  }
+
+  const builder = new ASTBuilder(source);
+  const ast = builder.build(cst);
+  return { ast, errors: allErrors };
+}
+
+/**
+ * Compile an ST algorithm (bare statement list) to a JavaScript body string
+ * that reads and writes a host-supplied scope object passed as `__s`.
+ *
+ * @param {string} source
+ * @param {import('./types').VariableDescriptor[]} variables
+ * @param {object} [options]
+ * @param {boolean} [options.strict=false] - Promote warnings to errors
+ * @returns {import('./types').AlgorithmCompileResult}
+ */
+function compileAlgorithm(source, variables, options = {}) {
+  const { strict = false } = options;
+  const emptyResult = (errors, warnings = []) => ({
+    code: '',
+    inputNames: [],
+    outputNames: [],
+    internalNames: [],
+    warnings,
+    errors,
+  });
+
+  if (!Array.isArray(variables)) {
+    return emptyResult([{
+      phase: 'validator', severity: 'error',
+      message: 'variables must be an array of VariableDescriptor',
+      line: 1, column: 0,
+    }]);
+  }
+
+  const { ast, errors: parseErrors } = parseAlgorithm(source);
+  const fatal = parseErrors.some(e => e.severity === 'error');
+  if (!ast || fatal) {
+    return emptyResult(parseErrors);
+  }
+
+  const validator = new Validator();
+  const validateErrors = validator.validateAlgorithm(ast, variables);
+
+  const allErrors = [...parseErrors, ...validateErrors.filter(e => e.severity === 'error')];
+  const allWarnings = validateErrors.filter(e => e.severity === 'warning');
+
+  if (strict && allWarnings.length > 0) {
+    // Promote warnings to errors
+    for (const w of allWarnings) {
+      allErrors.push({ ...w, severity: 'error' });
+    }
+  }
+
+  if (allErrors.some(e => e.severity === 'error')) {
+    return emptyResult(allErrors, allWarnings);
+  }
+
+  const codegen = new Codegen({ sourceMaps: false });
+  const result = codegen.generateAlgorithm(ast, variables, options);
+
+  return {
+    code: result.code,
+    inputNames: result.inputNames,
+    outputNames: result.outputNames,
+    internalNames: result.internalNames,
+    warnings: [...allWarnings, ...(result.warnings || []).map(msg => ({
+      phase: 'codegen', severity: 'warning', message: String(msg), line: 1, column: 0,
+    }))],
+    errors: allErrors,
+  };
+}
+
+module.exports = { parse, validate, compile, compileSync, parseAlgorithm, compileAlgorithm };

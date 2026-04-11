@@ -1,3 +1,5 @@
 .claude
 coverage
 node_modules
+.codex
+openspec

@@ -202,6 +202,47 @@ ST function blocks are called as: `fb_instance(inputs...)`. Since JS doesn't all
 
 ST `PROGRAM` declarations become CommonJS modules. All declared variables are exported as read-only getters so external code can observe state without mutation.
 
+## Algorithm Compile Mode (IEC 61499 snippets)
+
+The pipeline also supports a second entry shape for host environments (e.g. the
+IEC 61499 runtime) that need to compile a *bare statement list* against an
+externally declared variable interface. This is a thin alternate entry point
+that reuses the statement-level rules of each stage rather than a fork of the
+pipeline.
+
+- **Parser** exposes `parseStatementList()`: a public entry that loops over
+  `parseStatement()` until EOF and wraps the result in a `StatementList` CST
+  node. The internal helper used by control-flow bodies was renamed to
+  `_parseStatementsUntil(stopTypes)` so the public name is free. The existing
+  `parse()` entry still requires a top-level POU and rejects bare statement
+  lists.
+- **ASTBuilder** normalises the `StatementList` CST node into the corresponding
+  AST node (`NodeType.STATEMENT_LIST`).
+- **Validator** exposes `validateAlgorithm(ast, variables)`: it builds a fresh
+  root scope, seeds it from a caller-supplied `VariableDescriptor[]` (name,
+  type, direction), and then delegates to the existing statement-level walker.
+  Writes to `direction: 'input'` symbols are surfaced as validator errors.
+  Standard-function resolution already uses module-level allow-lists, so it
+  works without any POU scope.
+- **Codegen** exposes `generateAlgorithm(ast, variables, options)`: it walks
+  the statement list using the existing `_genNode`/`_genExpr` helpers and
+  overrides `_varRef()` so that descriptor names resolve to `__s["name"]`
+  reads and writes. Integer clamping is preserved because descriptor types are
+  registered in `_varTypes` before emission. No class, function, or `'use
+  strict';` wrapper is emitted — the output is a bare body that hosts wrap
+  themselves via `new Function('__s', code)`.
+- **Public API** exports `parseAlgorithm(source)` and
+  `compileAlgorithm(source, variables, options?)` from `src/index.js` /
+  `src/index.mjs`. `compileAlgorithm` returns `{ code, inputNames, outputNames,
+  internalNames, warnings, errors }`; `code` is empty whenever `errors`
+  contains any `severity: 'error'` entry.
+
+The generated algorithm body intentionally omits `'use strict';`: a JS
+fragment cannot legally include a strict directive mid-function, and the
+host's `new Function('__s', ...)` shim already runs in strict-by-default
+context inside an ES module. Hosts embedding the fragment should not be
+surprised by its absence.
+
 ## Extension Points
 
 - **New ST constructs:** Add token types to `src/types.js`, parsing rules to `Parser.js`, normalization to `ASTBuilder.js`, validation to `Validator.js`, and code generation to `Codegen.js`

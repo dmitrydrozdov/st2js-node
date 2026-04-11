@@ -1,6 +1,6 @@
 'use strict';
 
-const { parse, validate, compile, compileSync } = require('../../src/index');
+const { parse, validate, compile, compileSync, parseAlgorithm, compileAlgorithm } = require('../../src/index');
 
 describe('Public API', () => {
   describe('parse()', () => {
@@ -82,6 +82,109 @@ describe('Public API', () => {
       expect(() => {
         compileSync('INVALID @@@ CODE');
       }).toThrow('ST compilation failed');
+    });
+  });
+
+  describe('parseAlgorithm()', () => {
+    test('returns an AST without running validation', () => {
+      const result = parseAlgorithm('Count := Missing + 1;');
+      expect(result.ast).not.toBeNull();
+      const validatorErrors = result.errors.filter(e => e.phase === 'validator');
+      expect(validatorErrors).toHaveLength(0);
+    });
+
+    test('reports parse error', () => {
+      const result = parseAlgorithm('Count := ;');
+      const errs = result.errors.filter(e => e.severity === 'error');
+      expect(errs.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('compileAlgorithm()', () => {
+    test('successful compile round-trip: simple counter', () => {
+      const result = compileAlgorithm('Count := Count + 1;', [
+        { name: 'Count', type: 'INT', direction: 'internal' },
+      ]);
+      expect(result.errors.filter(e => e.severity === 'error')).toHaveLength(0);
+      expect(result.code).not.toBe('');
+      const fn = new Function('__s', result.code);
+      const scope = { Count: 4 };
+      fn(scope);
+      expect(scope.Count).toBe(5);
+    });
+
+    test('input read and output write', () => {
+      const result = compileAlgorithm('CV := CI * 2;', [
+        { name: 'CI', type: 'INT', direction: 'input' },
+        { name: 'CV', type: 'INT', direction: 'output' },
+      ]);
+      expect(result.errors.filter(e => e.severity === 'error')).toHaveLength(0);
+      expect(result.inputNames).toEqual(['CI']);
+      expect(result.outputNames).toEqual(['CV']);
+    });
+
+    test('parse error returns empty code', () => {
+      const result = compileAlgorithm('Count := ;', [
+        { name: 'Count', type: 'INT', direction: 'internal' },
+      ]);
+      const errs = result.errors.filter(e => e.severity === 'error');
+      expect(errs.length).toBeGreaterThan(0);
+      expect(errs.some(e => e.phase === 'parser')).toBe(true);
+      expect(result.code).toBe('');
+    });
+
+    test('validator error (write to input) returns empty code', () => {
+      const result = compileAlgorithm('CI := 0;', [
+        { name: 'CI', type: 'INT', direction: 'input' },
+      ]);
+      const errs = result.errors.filter(e => e.severity === 'error');
+      expect(errs.length).toBeGreaterThan(0);
+      expect(errs.some(e => e.phase === 'validator')).toBe(true);
+      expect(result.code).toBe('');
+    });
+
+    test('strict mode promotes warnings to errors', () => {
+      // assigning STRING to INT is a warning; strict should make it an error
+      const result = compileAlgorithm('r := s;', [
+        { name: 's', type: 'STRING', direction: 'input' },
+        { name: 'r', type: 'INT', direction: 'output' },
+      ], { strict: true });
+      expect(result.errors.some(e => e.severity === 'error')).toBe(true);
+      expect(result.code).toBe('');
+    });
+
+    test('duplicate descriptor names rejected', () => {
+      const result = compileAlgorithm('Count := 1;', [
+        { name: 'Count', type: 'INT', direction: 'input' },
+        { name: 'Count', type: 'INT', direction: 'output' },
+      ]);
+      expect(result.errors.some(e => /Duplicate/.test(e.message))).toBe(true);
+      expect(result.code).toBe('');
+    });
+
+    test('descriptor shape validation: not an array', () => {
+      const result = compileAlgorithm('x := 1;', null);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.code).toBe('');
+    });
+
+    test('invalid direction rejected', () => {
+      const result = compileAlgorithm('x := 1;', [
+        { name: 'x', type: 'INT', direction: 'inout' },
+      ]);
+      expect(result.errors.some(e => /direction/.test(e.message))).toBe(true);
+      expect(result.code).toBe('');
+    });
+
+    test('preserves descriptor order in name partitions', () => {
+      const result = compileAlgorithm('b := a + c;', [
+        { name: 'a', type: 'INT', direction: 'input' },
+        { name: 'b', type: 'INT', direction: 'output' },
+        { name: 'c', type: 'INT', direction: 'internal' },
+      ]);
+      expect(result.inputNames).toEqual(['a']);
+      expect(result.outputNames).toEqual(['b']);
+      expect(result.internalNames).toEqual(['c']);
     });
   });
 });

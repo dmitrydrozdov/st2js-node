@@ -161,6 +161,9 @@ const NodeType = {
   STRING_TYPE: 'StringType',
   SUBRANGE_TYPE: 'SubrangeType',
 
+  // Statement list (algorithm mode)
+  STATEMENT_LIST: 'StatementList',
+
   // Statements
   ASSIGNMENT: 'Assignment',
   IF_STATEMENT: 'IfStatement',
@@ -280,6 +283,23 @@ function makeError(phase, message, line, column, severity = 'error', code = unde
 /**
  * @typedef {Object} ValidateResult
  * @property {boolean} valid
+ * @property {STError[]} errors
+ */
+
+/**
+ * @typedef {Object} VariableDescriptor
+ * @property {string} name - ST variable name
+ * @property {string} type - ST type name ('INT', 'BOOL', 'REAL', etc.)
+ * @property {'input'|'output'|'internal'} direction
+ */
+
+/**
+ * @typedef {Object} AlgorithmCompileResult
+ * @property {string} code - Bare JS body string
+ * @property {string[]} inputNames
+ * @property {string[]} outputNames
+ * @property {string[]} internalNames
+ * @property {STError[]} warnings
  * @property {STError[]} errors
  */
 

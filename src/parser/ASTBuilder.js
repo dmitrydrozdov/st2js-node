@@ -30,6 +30,7 @@ class ASTBuilder {
 
     switch (node.type) {
       case 'ProgramFile':             return this.visitProgramFile(node);
+      case 'StatementList':           return this.visitStatementList(node);
       case 'FunctionBlockDeclaration':return this.visitFunctionBlock(node);
       case 'FunctionDeclaration':     return this.visitFunction(node);
       case 'ProgramDeclaration':      return this.visitProgram(node);
@@ -95,6 +96,14 @@ class ASTBuilder {
     return {
       type: NodeType.PROGRAM_FILE,
       declarations: this.visitMany(node.declarations),
+      loc: node.loc,
+    };
+  }
+
+  visitStatementList(node) {
+    return {
+      type: NodeType.STATEMENT_LIST,
+      statements: this.visitMany(node.statements),
       loc: node.loc,
     };
   }

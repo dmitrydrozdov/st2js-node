@@ -30,6 +30,9 @@ class Codegen {
     this._functionName = null;
     // POU names declared at top level (function blocks, functions, programs)
     this._topLevelPOUs = new Set();
+    // Algorithm mode: descriptor names routed through __s[...]
+    this._inAlgo = false;
+    this._algoScopeVars = new Set();
   }
 
   /**
@@ -53,6 +56,66 @@ class Codegen {
       code,
       sourceMap: this.sourceMaps ? { file: this.filename, mappings: [] } : null,
       warnings: this.warnings,
+    };
+  }
+
+  /**
+   * Generate a bare JS body for an algorithm (statement list) using a host
+   * scope object. Reads and writes to descriptor-named variables are rewritten
+   * to `__s["name"]` accesses.
+   *
+   * @param {object} ast - Root AST node (StatementList)
+   * @param {import('../types').VariableDescriptor[]} variables
+   * @param {object} [options]
+   * @returns {import('../types').AlgorithmCompileResult}
+   */
+  generateAlgorithm(ast, variables, options = {}) {
+    this._lines = [];
+    this._indent = 0;
+    this.warnings = [];
+
+    const prevInAlgo = this._inAlgo;
+    const prevAlgoVars = this._algoScopeVars;
+    const prevVarTypes = new Map(this._varTypes);
+    const prevInFB = this._inFB;
+
+    this._inAlgo = true;
+    this._inFB = false;
+    this._algoScopeVars = new Set();
+
+    const inputNames = [];
+    const outputNames = [];
+    const internalNames = [];
+
+    for (const v of variables || []) {
+      this._algoScopeVars.add(v.name);
+      this._varTypes.set(v.name, String(v.type).toUpperCase());
+      if (v.direction === 'input') inputNames.push(v.name);
+      else if (v.direction === 'output') outputNames.push(v.name);
+      else if (v.direction === 'internal') internalNames.push(v.name);
+    }
+
+    const statements = (ast && ast.statements) || [];
+    for (const stmt of statements) {
+      this._emitLineComment(stmt);
+      this._genNode(stmt);
+    }
+
+    const code = this._lines.join('\n') + (this._lines.length ? '\n' : '');
+
+    // Restore state
+    this._inAlgo = prevInAlgo;
+    this._algoScopeVars = prevAlgoVars;
+    this._varTypes = prevVarTypes;
+    this._inFB = prevInFB;
+
+    return {
+      code,
+      inputNames,
+      outputNames,
+      internalNames,
+      warnings: this.warnings.slice(),
+      errors: [],
     };
   }
 
@@ -402,6 +465,9 @@ class Codegen {
   // ─── Prefix helper for `this.` in FB context ──────────────────────────────
 
   _varRef(name) {
+    if (this._inAlgo && this._algoScopeVars.has(name)) {
+      return `__s[${JSON.stringify(name)}]`;
+    }
     if (this._inFB && this._fbInstanceVars.has(name)) {
       return `this.${name}`;
     }

@@ -501,7 +501,21 @@ class Parser {
     }
   }
 
-  parseStatementList(stopTypes = []) {
+  /**
+   * Public entry point: parse a bare statement list (algorithm body) until EOF.
+   * Returns a StatementList CST node. Does not require a surrounding POU.
+   */
+  parseStatementList() {
+    const start = this.current();
+    const statements = this._parseStatementsUntil([]);
+    return {
+      type: 'StatementList',
+      statements,
+      loc: this.loc(start, this.current()),
+    };
+  }
+
+  _parseStatementsUntil(stopTypes = []) {
     const stmts = [];
     const stop = new Set([...stopTypes, TokenType.EOF]);
     while (!stop.has(this.current().type)) {
@@ -515,7 +529,7 @@ class Parser {
     const startTok = this.expect(TokenType.IF);
     const condition = this.parseExpression();
     this.expect(TokenType.THEN);
-    const consequent = this.parseStatementList([
+    const consequent = this._parseStatementsUntil([
       TokenType.ELSIF, TokenType.ELSE, TokenType.END_IF
     ]);
 
@@ -524,7 +538,7 @@ class Parser {
       const elsifTok = this.advance();
       const elsifCond = this.parseExpression();
       this.expect(TokenType.THEN);
-      const elsifBody = this.parseStatementList([
+      const elsifBody = this._parseStatementsUntil([
         TokenType.ELSIF, TokenType.ELSE, TokenType.END_IF
       ]);
       elsifClauses.push({
@@ -538,7 +552,7 @@ class Parser {
     let elseClause = null;
     if (this.check(TokenType.ELSE)) {
       const elseTok = this.advance();
-      const elseBody = this.parseStatementList([TokenType.END_IF]);
+      const elseBody = this._parseStatementsUntil([TokenType.END_IF]);
       elseClause = {
         type: 'ElseClause',
         body: elseBody,
@@ -690,7 +704,7 @@ class Parser {
     }
 
     this.expect(TokenType.DO);
-    const body = this.parseStatementList([TokenType.END_FOR]);
+    const body = this._parseStatementsUntil([TokenType.END_FOR]);
     const endTok = this.expect(TokenType.END_FOR);
     this.match(TokenType.SEMICOLON);
 
@@ -709,7 +723,7 @@ class Parser {
     const startTok = this.expect(TokenType.WHILE);
     const condition = this.parseExpression();
     this.expect(TokenType.DO);
-    const body = this.parseStatementList([TokenType.END_WHILE]);
+    const body = this._parseStatementsUntil([TokenType.END_WHILE]);
     const endTok = this.expect(TokenType.END_WHILE);
     this.match(TokenType.SEMICOLON);
 
@@ -723,7 +737,7 @@ class Parser {
 
   parseRepeatStatement() {
     const startTok = this.expect(TokenType.REPEAT);
-    const body = this.parseStatementList([TokenType.UNTIL]);
+    const body = this._parseStatementsUntil([TokenType.UNTIL]);
     this.expect(TokenType.UNTIL);
     const condition = this.parseExpression();
     this.match(TokenType.SEMICOLON);

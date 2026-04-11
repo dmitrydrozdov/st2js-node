@@ -97,6 +97,72 @@ class Validator {
     return this.errors;
   }
 
+  /**
+   * Validate an algorithm-mode AST (a StatementList) against an externally
+   * supplied variable descriptor list. Seeds the root scope with the
+   * descriptors, then runs the usual statement-level walker.
+   *
+   * @param {import('../types').ASTNode} ast
+   * @param {import('../types').VariableDescriptor[]} variables
+   * @returns {import('../types').STError[]}
+   */
+  validateAlgorithm(ast, variables) {
+    this.errors = [];
+    if (!Array.isArray(variables)) {
+      this.errors.push(makeError('validator', 'variables must be an array of VariableDescriptor', 1, 0));
+      return this.errors;
+    }
+
+    const seen = new Set();
+    for (const v of variables) {
+      if (!v || typeof v.name !== 'string' || typeof v.type !== 'string') {
+        this.errors.push(makeError('validator', 'Each VariableDescriptor must have string name and type', 1, 0));
+        return this.errors;
+      }
+      if (v.direction !== 'input' && v.direction !== 'output' && v.direction !== 'internal') {
+        this.errors.push(makeError('validator', `Invalid direction '${v.direction}' for variable '${v.name}'`, 1, 0));
+        return this.errors;
+      }
+      const key = v.name.toUpperCase();
+      if (seen.has(key)) {
+        this.errors.push(makeError('validator', `Duplicate variable descriptor name '${v.name}'`, 1, 0));
+        return this.errors;
+      }
+      seen.add(key);
+    }
+
+    // Fresh root scope for algorithm mode.
+    this.globalScope = new Scope();
+    this.currentScope = this.globalScope;
+    this.inLoop = false;
+    this.inFunction = false;
+    this.currentPouName = null;
+    this.userTypes = new Map();
+    this._algoMode = true;
+    this._algoDescriptors = new Map();
+    for (const v of variables) {
+      const descriptor = { name: v.name, type: v.type, direction: v.direction };
+      this._algoDescriptors.set(v.name.toUpperCase(), descriptor);
+      this.currentScope.define(v.name, {
+        kind: 'variable',
+        varType: { type: NodeType.PRIMITIVE_TYPE, name: v.type.toUpperCase() },
+        direction: v.direction,
+      });
+    }
+
+    if (!ast) return this.errors;
+
+    try {
+      this.visitNode(ast);
+    } catch (e) {
+      this.errors.push(makeError('validator', `Internal validator error: ${e.message}`, 1, 0));
+    }
+
+    this._algoMode = false;
+    this._algoDescriptors = null;
+    return this.errors;
+  }
+
   error(message, node, severity = 'error', code = undefined) {
     const line = node && node.loc ? node.loc.line : 1;
     const col = node && node.loc ? node.loc.column : 0;
@@ -120,6 +186,7 @@ class Validator {
 
     switch (node.type) {
       case NodeType.PROGRAM_FILE:             return this.visitProgramFile(node);
+      case NodeType.STATEMENT_LIST:           return this.visitMany(node.statements);
       case NodeType.FUNCTION_BLOCK_DECLARATION: return this.visitFunctionBlock(node);
       case NodeType.FUNCTION_DECLARATION:     return this.visitFunction(node);
       case NodeType.PROGRAM_DECLARATION:      return this.visitProgram(node);
@@ -269,6 +336,9 @@ class Validator {
       const sym = this.currentScope.lookup(node.target.name);
       if (sym && sym.kind === 'constant') {
         this.error(`Cannot assign to constant '${node.target.name}'`, node);
+      }
+      if (sym && sym.direction === 'input') {
+        this.error(`Cannot assign to read-only input '${node.target.name}'`, node);
       }
     }
 

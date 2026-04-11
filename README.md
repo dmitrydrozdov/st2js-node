@@ -101,13 +101,72 @@ const { validate } = require('st2js');
 const { valid, errors } = validate(ast);
 ```
 
+### Compiling IEC 61499 algorithm snippets
+
+For hosts like the IEC 61499 runtime that need to compile a *bare statement list*
+(not a full POU) against a variable interface that lives outside the ST source,
+use `compileAlgorithm(source, variables, options?)`.
+
+```javascript
+const { compileAlgorithm } = require('st2js');
+
+const result = compileAlgorithm(
+  `IF Reset THEN
+     Count := 0;
+   ELSIF Enable THEN
+     Count := Count + 1;
+   END_IF;`,
+  [
+    { name: 'Reset',  type: 'BOOL', direction: 'input' },
+    { name: 'Enable', type: 'BOOL', direction: 'input' },
+    { name: 'Count',  type: 'INT',  direction: 'output' },
+  ],
+);
+
+if (result.errors.some(e => e.severity === 'error')) {
+  throw new Error(result.errors.map(e => e.message).join('\n'));
+}
+
+// Wrap and execute against a host scope object. All descriptor variables are
+// read/written as __s["name"] on a single `__s` parameter.
+const run = new Function('__s', result.code);
+const scope = { Reset: false, Enable: true, Count: 0 };
+run(scope); // scope.Count === 1
+run(scope); // scope.Count === 2
+```
+
+`compileAlgorithm` returns an `AlgorithmCompileResult`:
+
+```typescript
+{
+  code: string;            // bare JS body; "" if errors contains any severity: 'error'
+  inputNames: string[];    // descriptor names partitioned by direction (in caller order)
+  outputNames: string[];
+  internalNames: string[];
+  warnings: STError[];
+  errors: STError[];
+}
+```
+
+Descriptor rules:
+
+- `direction: 'input'` variables are **read-only**. Any assignment in the ST body
+  is reported as a validator error and `code` is empty.
+- `direction: 'output'` and `'internal'` variables can be read and written.
+- Descriptor names must be unique; duplicates are a validator error.
+- `type` is a plain ST type string (`'INT'`, `'BOOL'`, `'REAL'`, `'STRING'`, ...).
+  Integer types receive the same `| 0` 32-bit truncation as POU-mode codegen.
+
+A matching `parseAlgorithm(source)` is exposed for hosts that want to do their own
+validation or codegen — it returns `{ ast, errors }` and skips the validator pass.
+
 ### Error Object
 
 All error-producing functions return `STError` objects:
 
 ```typescript
 {
-  phase: 'lexer' | 'parser' | 'validator';
+  phase: 'lexer' | 'parser' | 'validator' | 'codegen';
   severity: 'error' | 'warning';
   message: string;
   line: number;   // 1-based
