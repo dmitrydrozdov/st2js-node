@@ -160,6 +160,63 @@ Descriptor rules:
 A matching `parseAlgorithm(source)` is exposed for hosts that want to do their own
 validation or codegen — it returns `{ ast, errors }` and skips the validator pass.
 
+### Compiling ST expressions (transition conditions)
+
+For hosts that need to evaluate a *single* ST expression — for example IEC 61499
+Basic FB transition conditions like `REQ AND count < threshold` — use
+`compileExpression(source, variables, options?)`. It compiles one ST expression
+to a bare JavaScript expression string that reads descriptor variables through
+`__s["name"]` on a host-supplied scope object. The returned `code` is **not**
+wrapped in `return`, a function, an assignment, or a statement terminator, so the
+host can plug it into whatever evaluation wrapper it likes.
+
+```javascript
+const { compileExpression } = require('st2js');
+
+const result = compileExpression(
+  'REQ AND count < threshold',
+  [
+    { name: 'REQ',       type: 'BOOL', direction: 'input' },
+    { name: 'count',     type: 'INT',  direction: 'input' },
+    { name: 'threshold', type: 'INT',  direction: 'input' },
+  ],
+);
+
+if (result.errors.some(e => e.severity === 'error')) {
+  throw new Error(result.errors.map(e => e.message).join('\n'));
+}
+
+// result.code === '(__s["REQ"] && (__s["count"] < __s["threshold"]))'
+
+const evalExpr = new Function('__s', 'return ' + result.code);
+evalExpr({ REQ: true,  count: 2, threshold: 5 }); // true
+evalExpr({ REQ: false, count: 2, threshold: 5 }); // false
+```
+
+`compileExpression` returns an `ExpressionCompileResult`:
+
+```typescript
+{
+  code: string;            // bare JS expression; "" if errors contains any severity: 'error'
+  inputNames: string[];    // descriptor names partitioned by direction (in caller order)
+  outputNames: string[];
+  internalNames: string[];
+  warnings: STError[];
+  errors: STError[];
+}
+```
+
+The same descriptor rules as `compileAlgorithm` apply (unique names, valid
+`direction`, etc.). Since expressions cannot assign, there is no "write to
+input" check. Identifiers that do not resolve against the descriptor list or a
+supported standard function are reported as `validator`-phase errors. The
+expression parser rejects trailing tokens and JavaScript-only syntax such as
+`===`, so `compileExpression('count === threshold', ...)` is a parser error.
+
+A matching `parseExpression(source)` returns `{ ast, errors }` for hosts that
+want to inspect or transform the expression AST without running the validator
+or codegen.
+
 ### Error Object
 
 All error-producing functions return `STError` objects:

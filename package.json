@@ -1,6 +1,6 @@
 {
   "name": "st2js",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Compiles IEC 61131-3 Structured Text (ST) to JavaScript",
   "main": "src/index.js",
   "types": "./index.d.ts",

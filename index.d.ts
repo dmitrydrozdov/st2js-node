@@ -72,6 +72,24 @@ export interface AlgorithmCompileResult {
   errors: STError[];
 }
 
+export interface ExpressionCompileOptions {
+  // Reserved for future use; expression compilation has no current options.
+}
+
+export interface ExpressionCompileResult {
+  /**
+   * Bare JavaScript expression string. Reads descriptor variables through
+   * `__s["name"]`. Not wrapped in a function, statement, or `return`.
+   * Empty string when `errors` contains any `severity === 'error'` entry.
+   */
+  code: string;
+  inputNames: string[];
+  outputNames: string[];
+  internalNames: string[];
+  warnings: STError[];
+  errors: STError[];
+}
+
 /** Parse a full ST program (FUNCTION_BLOCK / FUNCTION / PROGRAM). */
 export function parse(source: string): ParseResult;
 
@@ -99,6 +117,23 @@ export function compileAlgorithm(
   options?: AlgorithmCompileOptions,
 ): AlgorithmCompileResult;
 
+/**
+ * Parse a single ST expression and return the AST plus parser errors.
+ * Trailing tokens after the expression produce a parser error.
+ */
+export function parseExpression(source: string): ParseResult;
+
+/**
+ * Compile a single ST expression to a bare JavaScript expression string that
+ * reads descriptor variables through `__s["name"]`. Suitable for evaluation
+ * via `new Function("__s", "return " + result.code)`.
+ */
+export function compileExpression(
+  source: string,
+  variables: VariableDescriptor[],
+  options?: ExpressionCompileOptions,
+): ExpressionCompileResult;
+
 declare const _default: {
   parse: typeof parse;
   validate: typeof validate;
@@ -106,5 +141,7 @@ declare const _default: {
   compileSync: typeof compileSync;
   parseAlgorithm: typeof parseAlgorithm;
   compileAlgorithm: typeof compileAlgorithm;
+  parseExpression: typeof parseExpression;
+  compileExpression: typeof compileExpression;
 };
 export default _default;

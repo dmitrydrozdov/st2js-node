@@ -243,6 +243,44 @@ host's `new Function('__s', ...)` shim already runs in strict-by-default
 context inside an ES module. Hosts embedding the fragment should not be
 surprised by its absence.
 
+## Expression Compile Mode (transition conditions)
+
+A third entry shape supports hosts that need to compile a *single* ST
+expression — for example IEC 61499 Basic FB transition conditions like
+`REQ AND count < threshold`. This mode reuses the same expression rules as
+algorithm mode and emits a bare JavaScript expression string rather than a
+statement body.
+
+- **Parser** already exposes `parseExpression()` for use inside statement and
+  control-flow rules. The public facade in `src/index.js` invokes it directly,
+  then asserts that the parser is at EOF and records a `parser`-phase error if
+  any tokens remain. This rejects inputs like `REQ count` and JS-only syntax
+  such as `count === threshold` (which lexes as three `=` tokens, leaving the
+  trailing `= threshold` unconsumed).
+- **ASTBuilder** processes the expression CST via the existing `visitNode`
+  dispatch, which already handles `BinaryExpr`, `UnaryExpr`, `IdentifierRef`,
+  `FunctionCall`, and the literal node types.
+- **Validator** exposes `validateExpression(ast, variables)`: it shares the
+  descriptor-shape and uniqueness checks with `validateAlgorithm`, seeds a
+  fresh root scope from the descriptors, and runs the same expression
+  walker. The `_exprMode` flag promotes the existing "undeclared identifier"
+  warning to a hard error so missing names fail compilation, and standard
+  functions still resolve through the module-level allow-list. There is no
+  write-to-input check because expressions cannot assign.
+- **Codegen** exposes `generateExpression(ast, variables, options)`: it
+  configures the same algorithm-mode scope state used by `generateAlgorithm`
+  (`_inAlgo`, `_algoScopeVars`, `_varTypes`) so descriptor references emit as
+  `__s["name"]`, then calls `_genExpr(ast)` and returns the resulting string
+  directly. The expression carries no statement terminator, no `return`, no
+  function wrapper, and no assignment.
+- **Public API** exports `parseExpression(source)` and
+  `compileExpression(source, variables, options?)` from `src/index.js` /
+  `src/index.mjs`. `compileExpression` returns `{ code, inputNames,
+  outputNames, internalNames, warnings, errors }`; `code` is the empty string
+  whenever `errors` contains any `severity: 'error'` entry. Hosts wrap the
+  returned expression themselves, typically via
+  `new Function('__s', 'return ' + code)`.
+
 ## Extension Points
 
 - **New ST constructs:** Add token types to `src/types.js`, parsing rules to `Parser.js`, normalization to `ASTBuilder.js`, validation to `Validator.js`, and code generation to `Codegen.js`
@@ -286,9 +324,12 @@ st2js/
 │   │   ├── codegen/TypeMapper.test.js
 │   │   ├── runtime/TimerBlocks.test.js
 │   │   ├── runtime/StandardFunctions.test.js
-│   │   └── api.test.js
+│   │   ├── api.test.js
+│   │   └── expression.test.js
 │   ├── integration/
+│   │   ├── algorithm.test.js
 │   │   ├── compile.test.js
+│   │   ├── expression.test.js
 │   │   └── realworld.test.js
 │   └── fixtures/
 │       ├── pid_controller.st

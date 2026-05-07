@@ -8,11 +8,14 @@ import st2js, {
   compileSync,
   parseAlgorithm,
   compileAlgorithm,
+  parseExpression,
+  compileExpression,
   STError,
   VariableDescriptor,
   CompileOptions,
   CompileResult,
   AlgorithmCompileResult,
+  ExpressionCompileResult,
 } from '../../index';
 
 // parse / validate / compile / compileSync
@@ -46,14 +49,34 @@ const _ints: string[] = algo.internalNames;
 const _errs: STError[] = algo.errors;
 const _warns: STError[] = algo.warnings;
 
+// parseExpression
+const parsedExpr = parseExpression('REQ AND count < threshold');
+const exprAst = parsedExpr.ast;
+
+// compileExpression — happy path
+const expr: ExpressionCompileResult = compileExpression(
+  'REQ AND count < threshold',
+  descriptors,
+);
+const _exprCode: string = expr.code;
+const _exprIns: string[] = expr.inputNames;
+const _exprOuts: string[] = expr.outputNames;
+const _exprInts: string[] = expr.internalNames;
+const _exprErrs: STError[] = expr.errors;
+const _exprWarns: STError[] = expr.warnings;
+
 // Default-export shape
 const all = st2js;
 all.parse('');
 all.compileAlgorithm('', []);
+all.parseExpression('');
+all.compileExpression('', []);
 
 // Reference variables to silence unused-locals diagnostics
 void validated; void jsCode; void compiled; void ast; void _code;
 void _ins; void _outs; void _ints; void _errs; void _warns;
+void exprAst; void _exprCode; void _exprIns; void _exprOuts;
+void _exprInts; void _exprErrs; void _exprWarns;
 
 // NOTE: the negative test (malformed direction) lives in consumer-bad.ts and is
 // expected to produce a diagnostic when compiled.

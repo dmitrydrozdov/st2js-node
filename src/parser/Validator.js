@@ -163,6 +163,75 @@ class Validator {
     return this.errors;
   }
 
+  /**
+   * Validate an expression-mode AST (a single expression node) against an
+   * externally supplied variable descriptor list. Mirrors `validateAlgorithm`
+   * descriptor checks but treats undeclared identifiers as hard errors instead
+   * of warnings, since an expression has no statement-list context where a
+   * stray name might be declared elsewhere.
+   *
+   * @param {import('../types').ASTNode} ast
+   * @param {import('../types').VariableDescriptor[]} variables
+   * @returns {import('../types').STError[]}
+   */
+  validateExpression(ast, variables) {
+    this.errors = [];
+    if (!Array.isArray(variables)) {
+      this.errors.push(makeError('validator', 'variables must be an array of VariableDescriptor', 1, 0));
+      return this.errors;
+    }
+
+    const seen = new Set();
+    for (const v of variables) {
+      if (!v || typeof v.name !== 'string' || typeof v.type !== 'string') {
+        this.errors.push(makeError('validator', 'Each VariableDescriptor must have string name and type', 1, 0));
+        return this.errors;
+      }
+      if (v.direction !== 'input' && v.direction !== 'output' && v.direction !== 'internal') {
+        this.errors.push(makeError('validator', `Invalid direction '${v.direction}' for variable '${v.name}'`, 1, 0));
+        return this.errors;
+      }
+      const key = v.name.toUpperCase();
+      if (seen.has(key)) {
+        this.errors.push(makeError('validator', `Duplicate variable descriptor name '${v.name}'`, 1, 0));
+        return this.errors;
+      }
+      seen.add(key);
+    }
+
+    this.globalScope = new Scope();
+    this.currentScope = this.globalScope;
+    this.inLoop = false;
+    this.inFunction = false;
+    this.currentPouName = null;
+    this.userTypes = new Map();
+    this._algoMode = true;
+    this._exprMode = true;
+    this._algoDescriptors = new Map();
+    for (const v of variables) {
+      const descriptor = { name: v.name, type: v.type, direction: v.direction };
+      this._algoDescriptors.set(v.name.toUpperCase(), descriptor);
+      this.currentScope.define(v.name, {
+        kind: 'variable',
+        varType: { type: NodeType.PRIMITIVE_TYPE, name: v.type.toUpperCase() },
+        direction: v.direction,
+      });
+    }
+
+    if (!ast) return this.errors;
+
+    try {
+      this.visitNode(ast);
+    } catch (e) {
+      this.errors.push(makeError('validator', `Internal validator error: ${e.message}`, 1, 0));
+    }
+
+    this._algoMode = false;
+    this._exprMode = false;
+    this._algoDescriptors = null;
+    return this.errors;
+  }
+
   error(message, node, severity = 'error', code = undefined) {
     const line = node && node.loc ? node.loc.line : 1;
     const col = node && node.loc ? node.loc.column : 0;
@@ -507,7 +576,11 @@ class Validator {
       const upperName = node.name.toUpperCase();
       if (!STANDARD_FB_TYPES.has(upperName) && !STANDARD_FUNCTIONS.has(upperName) &&
           !this.userTypes.has(upperName)) {
-        this.warning(`Undeclared identifier '${node.name}'`, node);
+        if (this._exprMode) {
+          this.error(`Undeclared identifier '${node.name}'`, node);
+        } else {
+          this.warning(`Undeclared identifier '${node.name}'`, node);
+        }
       }
       return 'ANY';
     }

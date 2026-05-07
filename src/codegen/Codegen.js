@@ -119,6 +119,58 @@ class Codegen {
     };
   }
 
+  /**
+   * Generate a bare JS expression string for a single ST expression AST.
+   * Descriptor variables are read through `__s["name"]`.
+   *
+   * @param {object} ast - Root expression AST node
+   * @param {import('../types').VariableDescriptor[]} variables
+   * @param {object} [options]
+   * @returns {{ code: string, inputNames: string[], outputNames: string[], internalNames: string[], warnings: string[], errors: any[] }}
+   */
+  generateExpression(ast, variables, options = {}) {
+    this._lines = [];
+    this._indent = 0;
+    this.warnings = [];
+
+    const prevInAlgo = this._inAlgo;
+    const prevAlgoVars = this._algoScopeVars;
+    const prevVarTypes = new Map(this._varTypes);
+    const prevInFB = this._inFB;
+
+    this._inAlgo = true;
+    this._inFB = false;
+    this._algoScopeVars = new Set();
+
+    const inputNames = [];
+    const outputNames = [];
+    const internalNames = [];
+
+    for (const v of variables || []) {
+      this._algoScopeVars.add(v.name);
+      this._varTypes.set(v.name, String(v.type).toUpperCase());
+      if (v.direction === 'input') inputNames.push(v.name);
+      else if (v.direction === 'output') outputNames.push(v.name);
+      else if (v.direction === 'internal') internalNames.push(v.name);
+    }
+
+    const code = this._genExpr(ast);
+
+    this._inAlgo = prevInAlgo;
+    this._algoScopeVars = prevAlgoVars;
+    this._varTypes = prevVarTypes;
+    this._inFB = prevInFB;
+
+    return {
+      code,
+      inputNames,
+      outputNames,
+      internalNames,
+      warnings: this.warnings.slice(),
+      errors: [],
+    };
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   _emit(text) {
