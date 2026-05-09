@@ -160,6 +160,56 @@ Descriptor rules:
 A matching `parseAlgorithm(source)` is exposed for hosts that want to do their own
 validation or codegen — it returns `{ ast, errors }` and skips the validator pass.
 
+#### Composite descriptors (`P.REQ` style)
+
+A descriptor may declare an optional `members` array, turning it into a
+*composite* descriptor. Composite descriptors let ST authors write dotted
+access (`<descriptor>.<member>`) — useful for adapter ports and similar
+domain shapes — while the host keeps full control over the flat key the
+generated code reads and writes.
+
+```javascript
+const result = compileAlgorithm(
+  `IF P.REQ THEN
+     P.RESULT := X * 2;
+     X := X + 1;
+   END_IF;`,
+  [
+    { name: 'X', type: 'INT', direction: 'internal' },
+    {
+      name: 'P', type: 'ADAPTER', direction: 'input',
+      members: [
+        { name: 'REQ',    type: 'BOOL', direction: 'input'  },
+        { name: 'RESULT', type: 'INT',  direction: 'output', accessKey: 'P__$$__RESULT' },
+      ],
+    },
+  ],
+);
+
+// result.code reads __s["P.REQ"], writes __s["P__$$__RESULT"], and __s["X"].
+// result.inputNames    === ['P.REQ']
+// result.outputNames   === ['P__$$__RESULT']
+// result.internalNames === ['X']
+```
+
+`VariableMemberDescriptor` rules:
+
+- `name`, `type`, and `direction: 'input' | 'output'` are required.
+- `accessKey` overrides the runtime scope-object key. The default is
+  `"<parentName>.<memberName>"` — note the dot is part of the literal key on
+  `__s`, not a property dereference.
+- Member names must be unique within a single composite descriptor.
+- Writing to an `'input'` member is a validator error; only `'output'` members
+  are assignable in algorithm mode.
+- A bare reference to the composite parent (`X := P;`) is a validator error.
+- Multi-level access (`P.A.B`) against a composite descriptor is a validator
+  error — only one level of dotted access is supported.
+- Composite descriptors do **not** contribute their parent `name` to
+  `inputNames` / `outputNames` / `internalNames`; each member's effective
+  access key is bucketed by the member's own `direction`.
+
+The same shape applies to `compileExpression`.
+
 ### Compiling ST expressions (transition conditions)
 
 For hosts that need to evaluate a *single* ST expression — for example IEC 61499
@@ -216,6 +266,11 @@ expression parser rejects trailing tokens and JavaScript-only syntax such as
 A matching `parseExpression(source)` returns `{ ast, errors }` for hosts that
 want to inspect or transform the expression AST without running the validator
 or codegen.
+
+`compileExpression` accepts the same composite descriptor shape documented
+above for `compileAlgorithm`. For example,
+`compileExpression('P.REQ AND count < threshold', [...])` with a composite
+`P` descriptor emits `(__s["P.REQ"] && (__s["count"] < __s["threshold"]))`.
 
 ### Error Object
 

@@ -108,49 +108,19 @@ class Validator {
    */
   validateAlgorithm(ast, variables) {
     this.errors = [];
-    if (!Array.isArray(variables)) {
-      this.errors.push(makeError('validator', 'variables must be an array of VariableDescriptor', 1, 0));
+    this._algoMode = true;
+    this._exprMode = false;
+    if (!this._initAlgoState(variables)) {
+      this._algoMode = false;
+      this._algoDescriptors = null;
       return this.errors;
     }
 
-    const seen = new Set();
-    for (const v of variables) {
-      if (!v || typeof v.name !== 'string' || typeof v.type !== 'string') {
-        this.errors.push(makeError('validator', 'Each VariableDescriptor must have string name and type', 1, 0));
-        return this.errors;
-      }
-      if (v.direction !== 'input' && v.direction !== 'output' && v.direction !== 'internal') {
-        this.errors.push(makeError('validator', `Invalid direction '${v.direction}' for variable '${v.name}'`, 1, 0));
-        return this.errors;
-      }
-      const key = v.name.toUpperCase();
-      if (seen.has(key)) {
-        this.errors.push(makeError('validator', `Duplicate variable descriptor name '${v.name}'`, 1, 0));
-        return this.errors;
-      }
-      seen.add(key);
+    if (!ast) {
+      this._algoMode = false;
+      this._algoDescriptors = null;
+      return this.errors;
     }
-
-    // Fresh root scope for algorithm mode.
-    this.globalScope = new Scope();
-    this.currentScope = this.globalScope;
-    this.inLoop = false;
-    this.inFunction = false;
-    this.currentPouName = null;
-    this.userTypes = new Map();
-    this._algoMode = true;
-    this._algoDescriptors = new Map();
-    for (const v of variables) {
-      const descriptor = { name: v.name, type: v.type, direction: v.direction };
-      this._algoDescriptors.set(v.name.toUpperCase(), descriptor);
-      this.currentScope.define(v.name, {
-        kind: 'variable',
-        varType: { type: NodeType.PRIMITIVE_TYPE, name: v.type.toUpperCase() },
-        direction: v.direction,
-      });
-    }
-
-    if (!ast) return this.errors;
 
     try {
       this.visitNode(ast);
@@ -176,49 +146,21 @@ class Validator {
    */
   validateExpression(ast, variables) {
     this.errors = [];
-    if (!Array.isArray(variables)) {
-      this.errors.push(makeError('validator', 'variables must be an array of VariableDescriptor', 1, 0));
+    this._algoMode = true;
+    this._exprMode = true;
+    if (!this._initAlgoState(variables)) {
+      this._algoMode = false;
+      this._exprMode = false;
+      this._algoDescriptors = null;
       return this.errors;
     }
 
-    const seen = new Set();
-    for (const v of variables) {
-      if (!v || typeof v.name !== 'string' || typeof v.type !== 'string') {
-        this.errors.push(makeError('validator', 'Each VariableDescriptor must have string name and type', 1, 0));
-        return this.errors;
-      }
-      if (v.direction !== 'input' && v.direction !== 'output' && v.direction !== 'internal') {
-        this.errors.push(makeError('validator', `Invalid direction '${v.direction}' for variable '${v.name}'`, 1, 0));
-        return this.errors;
-      }
-      const key = v.name.toUpperCase();
-      if (seen.has(key)) {
-        this.errors.push(makeError('validator', `Duplicate variable descriptor name '${v.name}'`, 1, 0));
-        return this.errors;
-      }
-      seen.add(key);
+    if (!ast) {
+      this._algoMode = false;
+      this._exprMode = false;
+      this._algoDescriptors = null;
+      return this.errors;
     }
-
-    this.globalScope = new Scope();
-    this.currentScope = this.globalScope;
-    this.inLoop = false;
-    this.inFunction = false;
-    this.currentPouName = null;
-    this.userTypes = new Map();
-    this._algoMode = true;
-    this._exprMode = true;
-    this._algoDescriptors = new Map();
-    for (const v of variables) {
-      const descriptor = { name: v.name, type: v.type, direction: v.direction };
-      this._algoDescriptors.set(v.name.toUpperCase(), descriptor);
-      this.currentScope.define(v.name, {
-        kind: 'variable',
-        varType: { type: NodeType.PRIMITIVE_TYPE, name: v.type.toUpperCase() },
-        direction: v.direction,
-      });
-    }
-
-    if (!ast) return this.errors;
 
     try {
       this.visitNode(ast);
@@ -230,6 +172,118 @@ class Validator {
     this._exprMode = false;
     this._algoDescriptors = null;
     return this.errors;
+  }
+
+  /**
+   * Validate descriptor shape and seed `globalScope` / `_algoDescriptors`.
+   * Returns true on success. On any descriptor-shape failure, pushes a
+   * validator error onto `this.errors` and returns false.
+   *
+   * @param {import('../types').VariableDescriptor[]} variables
+   * @returns {boolean}
+   */
+  _initAlgoState(variables) {
+    if (!Array.isArray(variables)) {
+      this.errors.push(makeError('validator', 'variables must be an array of VariableDescriptor', 1, 0));
+      return false;
+    }
+
+    const seen = new Set();
+    const seeded = [];
+    for (const v of variables) {
+      if (!v || typeof v.name !== 'string' || typeof v.type !== 'string') {
+        this.errors.push(makeError('validator', 'Each VariableDescriptor must have string name and type', 1, 0));
+        return false;
+      }
+      if (v.direction !== 'input' && v.direction !== 'output' && v.direction !== 'internal') {
+        this.errors.push(makeError('validator', `Invalid direction '${v.direction}' for variable '${v.name}'`, 1, 0));
+        return false;
+      }
+      const key = v.name.toUpperCase();
+      if (seen.has(key)) {
+        this.errors.push(makeError('validator', `Duplicate variable descriptor name '${v.name}'`, 1, 0));
+        return false;
+      }
+      seen.add(key);
+
+      let info;
+      if (v.members !== undefined) {
+        if (!Array.isArray(v.members)) {
+          this.errors.push(makeError('validator', `Composite descriptor '${v.name}' members must be an array`, 1, 0));
+          return false;
+        }
+        const memberMap = new Map();
+        const memberSeen = new Set();
+        for (const m of v.members) {
+          if (!m || typeof m.name !== 'string' || typeof m.type !== 'string') {
+            this.errors.push(makeError('validator', `Composite descriptor '${v.name}' has a member with invalid name or type`, 1, 0));
+            return false;
+          }
+          if (m.direction !== 'input' && m.direction !== 'output') {
+            this.errors.push(makeError('validator', `Invalid direction '${m.direction}' for member '${v.name}.${m.name}'`, 1, 0));
+            return false;
+          }
+          if (m.accessKey !== undefined && typeof m.accessKey !== 'string') {
+            this.errors.push(makeError('validator', `Member '${v.name}.${m.name}' accessKey must be a string`, 1, 0));
+            return false;
+          }
+          const mKey = m.name.toUpperCase();
+          if (memberSeen.has(mKey)) {
+            this.errors.push(makeError('validator', `Duplicate member name '${m.name}' in composite descriptor '${v.name}'`, 1, 0));
+            return false;
+          }
+          memberSeen.add(mKey);
+          memberMap.set(mKey, {
+            name: m.name,
+            type: m.type,
+            direction: m.direction,
+            accessKey: typeof m.accessKey === 'string' ? m.accessKey : `${v.name}.${m.name}`,
+          });
+        }
+        info = {
+          kind: 'composite',
+          name: v.name,
+          type: v.type,
+          direction: v.direction,
+          members: memberMap,
+        };
+      } else {
+        info = {
+          kind: 'flat',
+          name: v.name,
+          type: v.type,
+          direction: v.direction,
+        };
+      }
+      seeded.push(info);
+    }
+
+    // Fresh root scope.
+    this.globalScope = new Scope();
+    this.currentScope = this.globalScope;
+    this.inLoop = false;
+    this.inFunction = false;
+    this.currentPouName = null;
+    this.userTypes = new Map();
+    this._algoDescriptors = new Map();
+
+    for (const info of seeded) {
+      this._algoDescriptors.set(info.name.toUpperCase(), info);
+      if (info.kind === 'composite') {
+        this.currentScope.define(info.name, {
+          kind: 'composite-descriptor',
+          descriptorInfo: info,
+          direction: info.direction,
+        });
+      } else {
+        this.currentScope.define(info.name, {
+          kind: 'variable',
+          varType: { type: NodeType.PRIMITIVE_TYPE, name: info.type.toUpperCase() },
+          direction: info.direction,
+        });
+      }
+    }
+    return true;
   }
 
   error(message, node, severity = 'error', code = undefined) {
@@ -410,6 +464,16 @@ class Validator {
         this.error(`Cannot assign to read-only input '${node.target.name}'`, node);
       }
     }
+    // Composite-member assignment: only 'output' members are writable in algo mode.
+    if (node.target.type === NodeType.MEMBER_ACCESS && node.target._compositeMember) {
+      const m = node.target._compositeMember;
+      if (m.direction === 'input') {
+        this.error(
+          `Cannot assign to input-direction member '${node.target._compositeParent}.${m.name}'`,
+          node,
+        );
+      }
+    }
 
     // Basic type compatibility (widened check)
     if (targetType && valueType && targetType !== 'ANY' && valueType !== 'ANY') {
@@ -554,8 +618,56 @@ class Validator {
   }
 
   visitMemberAccess(node) {
+    // Composite-descriptor handling: when the object is a direct identifier
+    // referring to a composite descriptor, resolve the member against the
+    // descriptor's members map. Skip the regular identifier visit so the
+    // bare-composite-reference error doesn't fire.
+    if (node.object && node.object.type === NodeType.IDENTIFIER_REF) {
+      const sym = this.currentScope.lookup(node.object.name);
+      if (sym && sym.kind === 'composite-descriptor') {
+        const info = sym.descriptorInfo;
+        const memberKey = String(node.member || '').toUpperCase();
+        const member = info.members.get(memberKey);
+        if (!member) {
+          this.error(
+            `Composite descriptor '${info.name}' has no member '${node.member}'`,
+            node,
+          );
+          return 'ANY';
+        }
+        node._compositeMember = member;
+        node._compositeParent = info.name;
+        return member.type.toUpperCase();
+      }
+    }
+
+    // Multi-level access against a composite descriptor: reject explicitly.
+    if (node.object && node.object.type === NodeType.MEMBER_ACCESS) {
+      const rootIdent = this._memberAccessRootIdent(node.object);
+      if (rootIdent) {
+        const rootSym = this.currentScope.lookup(rootIdent);
+        if (rootSym && rootSym.kind === 'composite-descriptor') {
+          this.error(
+            `Nested members are not supported on composite descriptor '${rootSym.descriptorInfo.name}'`,
+            node,
+          );
+          return 'ANY';
+        }
+      }
+    }
+
     this.visitNode(node.object);
     return 'ANY'; // Would need symbol table with struct info for precise typing
+  }
+
+  /** Walk a chain of MemberAccess nodes back to the root IDENTIFIER_REF name, or null. */
+  _memberAccessRootIdent(node) {
+    let cur = node;
+    while (cur && cur.type === NodeType.MEMBER_ACCESS) {
+      cur = cur.object;
+    }
+    if (cur && cur.type === NodeType.IDENTIFIER_REF) return cur.name;
+    return null;
   }
 
   visitArrayAccess(node) {
@@ -582,6 +694,14 @@ class Validator {
           this.warning(`Undeclared identifier '${node.name}'`, node);
         }
       }
+      return 'ANY';
+    }
+
+    if (sym.kind === 'composite-descriptor') {
+      this.error(
+        `Composite descriptor '${sym.descriptorInfo.name}' cannot be referenced without a member`,
+        node,
+      );
       return 'ANY';
     }
 

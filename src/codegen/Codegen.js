@@ -33,6 +33,9 @@ class Codegen {
     // Algorithm mode: descriptor names routed through __s[...]
     this._inAlgo = false;
     this._algoScopeVars = new Set();
+    // Composite descriptor lookup (algo mode only):
+    //   parentNameUpper -> Map<memberNameUpper, { name, type, direction, accessKey }>
+    this._compositeDescriptors = new Map();
   }
 
   /**
@@ -78,22 +81,14 @@ class Codegen {
     const prevAlgoVars = this._algoScopeVars;
     const prevVarTypes = new Map(this._varTypes);
     const prevInFB = this._inFB;
+    const prevComposite = this._compositeDescriptors;
 
     this._inAlgo = true;
     this._inFB = false;
     this._algoScopeVars = new Set();
+    this._compositeDescriptors = new Map();
 
-    const inputNames = [];
-    const outputNames = [];
-    const internalNames = [];
-
-    for (const v of variables || []) {
-      this._algoScopeVars.add(v.name);
-      this._varTypes.set(v.name, String(v.type).toUpperCase());
-      if (v.direction === 'input') inputNames.push(v.name);
-      else if (v.direction === 'output') outputNames.push(v.name);
-      else if (v.direction === 'internal') internalNames.push(v.name);
-    }
+    const { inputNames, outputNames, internalNames } = this._seedAlgoDescriptors(variables);
 
     const statements = (ast && ast.statements) || [];
     for (const stmt of statements) {
@@ -108,6 +103,7 @@ class Codegen {
     this._algoScopeVars = prevAlgoVars;
     this._varTypes = prevVarTypes;
     this._inFB = prevInFB;
+    this._compositeDescriptors = prevComposite;
 
     return {
       code,
@@ -137,22 +133,14 @@ class Codegen {
     const prevAlgoVars = this._algoScopeVars;
     const prevVarTypes = new Map(this._varTypes);
     const prevInFB = this._inFB;
+    const prevComposite = this._compositeDescriptors;
 
     this._inAlgo = true;
     this._inFB = false;
     this._algoScopeVars = new Set();
+    this._compositeDescriptors = new Map();
 
-    const inputNames = [];
-    const outputNames = [];
-    const internalNames = [];
-
-    for (const v of variables || []) {
-      this._algoScopeVars.add(v.name);
-      this._varTypes.set(v.name, String(v.type).toUpperCase());
-      if (v.direction === 'input') inputNames.push(v.name);
-      else if (v.direction === 'output') outputNames.push(v.name);
-      else if (v.direction === 'internal') internalNames.push(v.name);
-    }
+    const { inputNames, outputNames, internalNames } = this._seedAlgoDescriptors(variables);
 
     const code = this._genExpr(ast);
 
@@ -160,6 +148,7 @@ class Codegen {
     this._algoScopeVars = prevAlgoVars;
     this._varTypes = prevVarTypes;
     this._inFB = prevInFB;
+    this._compositeDescriptors = prevComposite;
 
     return {
       code,
@@ -169,6 +158,68 @@ class Codegen {
       warnings: this.warnings.slice(),
       errors: [],
     };
+  }
+
+  /**
+   * Seed algorithm-mode state from a descriptor list. Flat descriptors
+   * register their `name` in `_algoScopeVars` and contribute it to the
+   * direction bucket. Composite descriptors register their parent `name` in
+   * `_algoScopeVars` so member-access lookups can recognise it, but the parent
+   * does NOT contribute to the direction buckets — each member contributes
+   * its effective access key (`accessKey` or `"<parent>.<member>"`) to the
+   * bucket matching the member's `direction`.
+   *
+   * @param {import('../types').VariableDescriptor[]} variables
+   * @returns {{ inputNames: string[], outputNames: string[], internalNames: string[] }}
+   */
+  _seedAlgoDescriptors(variables) {
+    const inputNames = [];
+    const outputNames = [];
+    const internalNames = [];
+
+    for (const v of variables || []) {
+      if (Array.isArray(v.members)) {
+        // Composite: register parent for member-access lookup; bucket each
+        // member's effective access key by member direction.
+        this._algoScopeVars.add(v.name);
+        const memberMap = new Map();
+        for (const m of v.members) {
+          if (!m || typeof m.name !== 'string') continue;
+          const accessKey = typeof m.accessKey === 'string' ? m.accessKey : `${v.name}.${m.name}`;
+          memberMap.set(m.name.toUpperCase(), {
+            name: m.name,
+            type: String(m.type || '').toUpperCase(),
+            direction: m.direction,
+            accessKey,
+          });
+          this._varTypes.set(accessKey, String(m.type || '').toUpperCase());
+          if (m.direction === 'input') inputNames.push(accessKey);
+          else if (m.direction === 'output') outputNames.push(accessKey);
+        }
+        this._compositeDescriptors.set(v.name.toUpperCase(), memberMap);
+      } else {
+        this._algoScopeVars.add(v.name);
+        this._varTypes.set(v.name, String(v.type).toUpperCase());
+        if (v.direction === 'input') inputNames.push(v.name);
+        else if (v.direction === 'output') outputNames.push(v.name);
+        else if (v.direction === 'internal') internalNames.push(v.name);
+      }
+    }
+    return { inputNames, outputNames, internalNames };
+  }
+
+  /**
+   * If `node` is a `MemberAccess` whose object is a composite-descriptor
+   * IDENTIFIER_REF in algorithm mode, return the matching member descriptor;
+   * otherwise null.
+   */
+  _resolveCompositeMember(node) {
+    if (!this._inAlgo) return null;
+    if (!node || node.type !== NodeType.MEMBER_ACCESS) return null;
+    if (!node.object || node.object.type !== NodeType.IDENTIFIER_REF) return null;
+    const map = this._compositeDescriptors.get(String(node.object.name).toUpperCase());
+    if (!map) return null;
+    return map.get(String(node.member || '').toUpperCase()) || null;
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -698,8 +749,13 @@ class Codegen {
     switch (node.type) {
       case NodeType.IDENTIFIER_REF:
         return this._varRef(node.name);
-      case NodeType.MEMBER_ACCESS:
+      case NodeType.MEMBER_ACCESS: {
+        const member = this._resolveCompositeMember(node);
+        if (member) {
+          return `__s[${JSON.stringify(member.accessKey)}]`;
+        }
         return `${this._genExprLhs(node.object)}.${node.member}`;
+      }
       case NodeType.ARRAY_ACCESS: {
         const arr = this._genExprLhs(node.array);
         const idxs = (node.indices || []).map(i => this._genExpr(i));
@@ -739,8 +795,13 @@ class Codegen {
       case NodeType.IDENTIFIER_REF:
         return this._varRef(node.name);
 
-      case NodeType.MEMBER_ACCESS:
+      case NodeType.MEMBER_ACCESS: {
+        const member = this._resolveCompositeMember(node);
+        if (member) {
+          return `__s[${JSON.stringify(member.accessKey)}]`;
+        }
         return `${this._genExpr(node.object)}.${node.member}`;
+      }
 
       case NodeType.ARRAY_ACCESS: {
         const arr = this._genExpr(node.array);
@@ -866,7 +927,11 @@ class Codegen {
       case NodeType.UNARY_EXPR:
         if (node.operator === 'NOT') return 'BOOL';
         return this._inferType(node.operand);
-      case NodeType.MEMBER_ACCESS:    return 'INT'; // conservative
+      case NodeType.MEMBER_ACCESS: {
+        const member = this._resolveCompositeMember(node);
+        if (member && member.type) return member.type;
+        return 'INT'; // conservative
+      }
       case NodeType.ARRAY_ACCESS:     return 'INT'; // conservative
       case NodeType.FUNCTION_CALL:    return 'INT'; // conservative
       default:                        return 'INT';

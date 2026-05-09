@@ -45,12 +45,42 @@ export interface CompileResult {
 /**
  * A single variable on the host-side FB interface that an algorithm can
  * read from (all directions) and, for output/internal, write to.
+ *
+ * When `members` is present, the descriptor is *composite*: ST source can
+ * use dotted access (`<name>.<member>`) to reach individual leaves, and the
+ * generated code emits `__s["<accessKey>"]` for each member (defaulting to
+ * `"<name>.<member>"` if `accessKey` is omitted). A bare reference to a
+ * composite descriptor (`<name>` without `.<member>`) is a validator error.
  */
 export interface VariableDescriptor {
   name: string;
   /** IEC 61131-3 type identifier (e.g. 'INT', 'BOOL', 'REAL', 'STRING'). */
   type: string;
   direction: 'input' | 'output' | 'internal';
+  /**
+   * Optional named leaf elements reachable via dotted access. When present,
+   * the descriptor is composite (see `VariableMemberDescriptor`).
+   */
+  members?: VariableMemberDescriptor[];
+}
+
+/**
+ * A leaf element of a composite `VariableDescriptor`. Reached from ST source
+ * as `<parent.name>.<member.name>`. The generated code emits
+ * `__s["<accessKey>"]` for reads and writes; if `accessKey` is omitted, the
+ * default is `"<parent.name>.<member.name>"`.
+ */
+export interface VariableMemberDescriptor {
+  name: string;
+  /** IEC 61131-3 type identifier of the member's value. */
+  type: string;
+  /** `'output'` members may be assigned to in algorithm mode; `'input'` may not. */
+  direction: 'input' | 'output';
+  /**
+   * Override for the runtime scope key used in the emitted JavaScript.
+   * Defaults to `"<parent.name>.<name>"`.
+   */
+  accessKey?: string;
 }
 
 export interface AlgorithmCompileOptions {
@@ -110,6 +140,12 @@ export function parseAlgorithm(source: string): ParseResult;
  * Returns a body string that can be instantiated via
  * `new Function("__s", result.code)` and executed with a host-supplied scope
  * object.
+ *
+ * Composite descriptors (those with a `members` array) expand to
+ * `__s["<accessKey>"]` accesses for each member used in ST source, and
+ * contribute their members' effective access keys (rather than the parent
+ * `name`) to `inputNames`/`outputNames` according to each member's
+ * `direction`.
  */
 export function compileAlgorithm(
   source: string,
@@ -127,6 +163,10 @@ export function parseExpression(source: string): ParseResult;
  * Compile a single ST expression to a bare JavaScript expression string that
  * reads descriptor variables through `__s["name"]`. Suitable for evaluation
  * via `new Function("__s", "return " + result.code)`.
+ *
+ * Composite descriptors (those with a `members` array) expand to
+ * `__s["<accessKey>"]` for member accesses in ST source. A bare reference to
+ * a composite descriptor (without `.<member>`) is a validator error.
  */
 export function compileExpression(
   source: string,

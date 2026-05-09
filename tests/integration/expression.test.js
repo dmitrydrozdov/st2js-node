@@ -23,6 +23,34 @@ describe('Integration: compileExpression', () => {
     expect(fn({ REQ: false, count: 2, threshold: 5 })).toBe(false);
   });
 
+  test('composite descriptors compile and round-trip through ESM', () => {
+    const script = `
+      import('${path.resolve(__dirname, '..', '..', 'src', 'index.mjs').replace(/\\/g, '\\\\')}')
+        .then(m => {
+          const result = m.compileExpression('P.REQ AND X > 0', [
+            { name: 'X', type: 'INT', direction: 'internal' },
+            { name: 'P', type: 'ADAPTER', direction: 'input', members: [
+              { name: 'REQ', type: 'BOOL', direction: 'input' },
+            ]},
+          ]);
+          process.stdout.write(JSON.stringify({
+            errors: result.errors.length,
+            hasReq: result.code.includes('__s["P.REQ"]'),
+            hasX: result.code.includes('__s["X"]'),
+            inputNames: result.inputNames,
+          }));
+        })
+        .catch(err => { process.stderr.write(String(err)); process.exit(1); });
+    `;
+    const res = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    expect(res.status).toBe(0);
+    const parsed = JSON.parse(res.stdout);
+    expect(parsed.errors).toBe(0);
+    expect(parsed.hasReq).toBe(true);
+    expect(parsed.hasX).toBe(true);
+    expect(parsed.inputNames).toContain('P.REQ');
+  });
+
   test('ESM named exports include parseExpression and compileExpression', () => {
     const script = `
       import('${path.resolve(__dirname, '..', '..', 'src', 'index.mjs').replace(/\\/g, '\\\\')}')

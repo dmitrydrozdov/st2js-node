@@ -12,6 +12,7 @@ import st2js, {
   compileExpression,
   STError,
   VariableDescriptor,
+  VariableMemberDescriptor,
   CompileOptions,
   CompileResult,
   AlgorithmCompileResult,
@@ -72,11 +73,32 @@ all.compileAlgorithm('', []);
 all.parseExpression('');
 all.compileExpression('', []);
 
+// Composite descriptors (members + accessKey)
+const portMembers: VariableMemberDescriptor[] = [
+  { name: 'REQ', type: 'BOOL', direction: 'input' },
+  { name: 'CNF', type: 'BOOL', direction: 'output', accessKey: 'P__$$__CNF' },
+];
+const compositeDescriptors: VariableDescriptor[] = [
+  { name: 'X', type: 'INT', direction: 'internal' },
+  { name: 'P', type: 'ADAPTER', direction: 'input', members: portMembers },
+];
+const compositeAlgo: AlgorithmCompileResult = compileAlgorithm(
+  'IF P.REQ THEN P.CNF := TRUE; X := X + 1; END_IF;',
+  compositeDescriptors,
+);
+const compositeExpr: ExpressionCompileResult = compileExpression(
+  'P.REQ AND X > 0',
+  compositeDescriptors,
+);
+const _compositeCode: string = compositeAlgo.code;
+const _compositeExprCode: string = compositeExpr.code;
+
 // Reference variables to silence unused-locals diagnostics
 void validated; void jsCode; void compiled; void ast; void _code;
 void _ins; void _outs; void _ints; void _errs; void _warns;
 void exprAst; void _exprCode; void _exprIns; void _exprOuts;
 void _exprInts; void _exprErrs; void _exprWarns;
+void _compositeCode; void _compositeExprCode;
 
 // NOTE: the negative test (malformed direction) lives in consumer-bad.ts and is
 // expected to produce a diagnostic when compiled.

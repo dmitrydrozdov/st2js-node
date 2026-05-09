@@ -281,6 +281,54 @@ statement body.
   returned expression themselves, typically via
   `new Function('__s', 'return ' + code)`.
 
+## Composite Descriptors
+
+A descriptor passed to `compileAlgorithm`/`compileExpression` (and their
+validator and codegen entry points) may declare an optional `members` array,
+turning it into a *composite* descriptor. Composite descriptors model
+domain-shaped identifiers — e.g. IEC 61499 adapter ports — that ST source
+reaches via dotted access (`<parent>.<member>`) while the host maps each leaf
+to a flat key on the `__s` runtime scope object.
+
+The validator and codegen agree on the **access-key contract**: each member
+has an effective access key — its `accessKey` override, or
+`"<parent>.<member>"` by default — and the generated JavaScript reads and
+writes that key via `__s["<accessKey>"]`. Both reads and writes use the
+identical access-key form; direction enforcement is the validator's job, not
+codegen's.
+
+- **Validator** (`Validator._initAlgoState`) registers each composite
+  descriptor in the root scope as a single `composite-descriptor` symbol
+  carrying a normalised `members: Map<UPPER, member>` map (with each member's
+  resolved `accessKey` baked in). `visitMemberAccess` short-circuits the
+  regular identifier visit when the object resolves to a composite symbol;
+  it looks up the member, attaches `_compositeMember`/`_compositeParent` onto
+  the `MemberAccess` AST node, and returns the member's `type`. Unknown
+  members, multi-level access against a composite root, duplicate member
+  names, bare composite references (in the identifier-reference path), and
+  assignments to `direction: 'input'` members are surfaced as `validator`-phase
+  errors.
+- **Codegen** (`Codegen._seedAlgoDescriptors`) builds its own composite
+  lookup (`Map<parentNameUpper, Map<memberNameUpper, memberInfo>>`) from the
+  descriptor list — independent of validator annotations, so unit-level
+  codegen tests work without a validator pass. `_genExpr`/`_genExprLhs` detect
+  `MemberAccess` nodes whose object is a composite-descriptor identifier and
+  emit `__s["<accessKey>"]` for both reads and writes. Non-composite member
+  access (any `MemberAccess` whose root is not a registered composite parent)
+  passes through the existing `${objectExpr}.${memberName}` lowering
+  unchanged.
+- **Result arrays** (`AlgorithmCompileResult` / `ExpressionCompileResult`)
+  skip the composite parent's own `name` and instead append each member's
+  effective access key to the bucket matching that member's `direction`.
+  Flat descriptors continue to contribute their `name` to the bucket matching
+  their own `direction`. Composite descriptors do not appear in
+  `internalNames`.
+
+The empty-string `code` contract on validator errors is unchanged: when
+`compileAlgorithm`/`compileExpression` see any `severity: 'error'` entry,
+they return `code: ''` and the buckets are populated only from successful
+seeding.
+
 ## Extension Points
 
 - **New ST constructs:** Add token types to `src/types.js`, parsing rules to `Parser.js`, normalization to `ASTBuilder.js`, validation to `Validator.js`, and code generation to `Codegen.js`

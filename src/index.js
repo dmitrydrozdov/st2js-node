@@ -132,6 +132,13 @@ function parseAlgorithm(source) {
  * Compile an ST algorithm (bare statement list) to a JavaScript body string
  * that reads and writes a host-supplied scope object passed as `__s`.
  *
+ * Each `VariableDescriptor` may declare an optional `members` array. When
+ * present, the descriptor is *composite*: dotted access in ST (`P.REQ`)
+ * resolves the member, codegen emits `__s["<accessKey>"]`
+ * (defaulting to `"<parent>.<member>"`), and the parent's own `name` is
+ * omitted from the result direction buckets in favour of each member's
+ * effective access key bucketed by the member's `direction`.
+ *
  * @param {string} source
  * @param {import('./types').VariableDescriptor[]} variables
  * @param {object} [options]
@@ -242,6 +249,12 @@ function parseExpression(source) {
 /**
  * Compile an ST expression to a bare JavaScript expression string that reads
  * descriptor variables from a host-supplied scope object as `__s["name"]`.
+ *
+ * Each `VariableDescriptor` may declare an optional `members` array. When
+ * present, dotted access in ST (`P.REQ`) resolves the member and codegen
+ * emits `__s["<accessKey>"]` (defaulting to `"<parent>.<member>"`). A bare
+ * reference to a composite descriptor (without `.<member>`) is a
+ * validator-phase error.
  *
  * @param {string} source
  * @param {import('./types').VariableDescriptor[]} variables

@@ -287,10 +287,19 @@ function makeError(phase, message, line, column, severity = 'error', code = unde
  */
 
 /**
+ * @typedef {Object} VariableMemberDescriptor
+ * @property {string} name - Member name reachable via `<parent>.<name>`
+ * @property {string} type - ST type name of the member value
+ * @property {'input'|'output'} direction
+ * @property {string} [accessKey] - Override for the `__s` scope key. Defaults to `"<parent>.<name>"`.
+ */
+
+/**
  * @typedef {Object} VariableDescriptor
  * @property {string} name - ST variable name
  * @property {string} type - ST type name ('INT', 'BOOL', 'REAL', etc.)
  * @property {'input'|'output'|'internal'} direction
+ * @property {VariableMemberDescriptor[]} [members] - When present, the descriptor is composite.
  */
 
 /**
