@@ -111,7 +111,7 @@ describe('Composite descriptors: compileAlgorithm', () => {
   });
 
   test('result arrays bucket members by member direction; parent name absent', () => {
-    const result = compileAlgorithm('X := P.REQ; P.RESULT := X;', [
+    const result = compileAlgorithm('IF P.REQ THEN P.RESULT := X; END_IF;', [
       { name: 'X', type: 'INT', direction: 'internal' },
       { name: 'P', type: 'ADAPTER', direction: 'input', members: [
         { name: 'REQ',    type: 'BOOL', direction: 'input' },

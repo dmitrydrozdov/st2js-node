@@ -35,7 +35,7 @@ class ASTBuilder {
       case 'FunctionDeclaration':     return this.visitFunction(node);
       case 'ProgramDeclaration':      return this.visitProgram(node);
       case 'TypeDeclaration':         return this.visitTypeDeclaration(node);
-      case 'TypeAliasDeclaration':    return this.visitTypeAlias(node);
+      case NodeType.TYPE_ALIAS_DECLARATION: return this.visitTypeAlias(node);
       case 'VarSection':              return this.visitVarSection(node);
       case 'VarDeclaration':          return this.visitVarDeclaration(node);
 
@@ -76,7 +76,7 @@ class ASTBuilder {
       case 'TimeLiteral':             return node;
       case 'DateLiteral':             return node;
       case 'TypedLiteral':            return this.visitTypedLiteral(node);
-      case 'RangeLiteral':            return node;
+      case 'RangeLiteral':            return this.visitRangeLiteral(node);
       case 'NamedArgument':           return this.visitNamedArgument(node);
 
       default:
@@ -149,7 +149,7 @@ class ASTBuilder {
 
   visitTypeAlias(node) {
     return {
-      type: 'TypeAliasDeclaration',
+      type: NodeType.TYPE_ALIAS_DECLARATION,
       name: node.name,
       typeDef: this.visitNode(node.typeDef),
       initialValue: node.initialValue ? this.visitNode(node.initialValue) : null,
@@ -373,6 +373,16 @@ class ASTBuilder {
       type: NodeType.TYPED_LITERAL,
       typeName: node.typeName,
       value: this.visitNode(node.value),
+      raw: node.raw,
+      loc: node.loc,
+    };
+  }
+
+  visitRangeLiteral(node) {
+    return {
+      type: NodeType.RANGE_LITERAL,
+      lo: this.visitNode(node.lo),
+      hi: this.visitNode(node.hi),
       loc: node.loc,
     };
   }

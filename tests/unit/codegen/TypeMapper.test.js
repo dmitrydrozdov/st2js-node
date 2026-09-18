@@ -79,4 +79,50 @@ describe('TypeMapper', () => {
     test('BOOL does not need clamp', () => expect(TypeMapper.needsIntegerClamp('BOOL')).toBe(false));
     test('STRING does not need clamp', () => expect(TypeMapper.needsIntegerClamp('STRING')).toBe(false));
   });
+
+  describe('parenthesize / unparenthesize', () => {
+    test('adds parentheses only when needed', () => {
+      expect(TypeMapper.parenthesize('a + b')).toBe('(a + b)');
+      expect(TypeMapper.parenthesize('(a + b)')).toBe('(a + b)');
+      expect(TypeMapper.parenthesize('(a) + (b)')).toBe('((a) + (b))');
+      expect(TypeMapper.parenthesize('f(x)')).toBe('(f(x))');
+      expect(TypeMapper.parenthesize('')).toBe('()');
+    });
+
+    test('removes one redundant outer pair', () => {
+      expect(TypeMapper.unparenthesize('(a + b)')).toBe('a + b');
+      expect(TypeMapper.unparenthesize('((a))')).toBe('(a)');
+      expect(TypeMapper.unparenthesize('(a) + (b)')).toBe('(a) + (b)');
+      expect(TypeMapper.unparenthesize('x')).toBe('x');
+      expect(TypeMapper.unparenthesize('(")" + x)')).toBe('(")" + x)');
+    });
+  });
+
+  describe('wrapInteger', () => {
+    test.each([
+      ['SINT', '((a + b) << 24) >> 24'],
+      ['INT', '((a + b) << 16) >> 16'],
+      ['DINT', '(a + b) | 0'],
+      ['USINT', '(a + b) & 0xFF'],
+      ['UINT', '(a + b) & 0xFFFF'],
+      ['UDINT', '(a + b) >>> 0'],
+      ['BYTE', '(a + b) & 0xFF'],
+      ['WORD', '(a + b) & 0xFFFF'],
+      ['DWORD', '(a + b) >>> 0'],
+      ['LINT', 'Math.trunc(a + b)'],
+      ['ULINT', 'Math.trunc(a + b)'],
+      ['LWORD', 'Math.trunc(a + b)'],
+      ['REAL', 'a + b'],
+      ['BOOL', 'a + b'],
+    ])('%s -> %s', (type, expected) => {
+      expect(TypeMapper.wrapInteger('a + b', type)).toBe(expected);
+    });
+
+    test('bigint mode for 64-bit types', () => {
+      expect(TypeMapper.wrapInteger('(a + b)', 'LINT', 'bigint')).toBe('BigInt.asIntN(64, a + b)');
+      expect(TypeMapper.wrapInteger('a', 'ULINT', 'bigint')).toBe('BigInt.asUintN(64, a)');
+      expect(TypeMapper.wrapInteger('a', 'LWORD', 'bigint')).toBe('BigInt.asUintN(64, a)');
+      expect(TypeMapper.wrapInteger('a', 'DINT', 'bigint')).toBe('(a) | 0');
+    });
+  });
 });

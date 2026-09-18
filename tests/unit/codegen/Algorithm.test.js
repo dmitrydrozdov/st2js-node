@@ -3,24 +3,29 @@
 const Lexer = require('../../../src/lexer/Lexer');
 const Parser = require('../../../src/parser/Parser');
 const ASTBuilder = require('../../../src/parser/ASTBuilder');
+const Validator = require('../../../src/parser/Validator');
 const Codegen = require('../../../src/codegen/Codegen');
 
-function compile(src, vars) {
+// Codegen reads the annotations written by the typing pass, so the validator
+// (which runs the analyzer) must precede it.
+function compile(src, vars, options = {}) {
   const lexer = new Lexer(src);
   const tokens = lexer.tokenize();
   const parser = new Parser(tokens, src);
   const cst = parser.parseStatementList();
   const ast = new ASTBuilder(src).build(cst);
-  return new Codegen({ sourceMaps: false }).generateAlgorithm(ast, vars);
+  const errors = new Validator().validateAlgorithm(ast, vars);
+  expect(errors.filter(e => e.severity === 'error')).toHaveLength(0);
+  return new Codegen({ sourceMaps: false, ...options }).generateAlgorithm(ast, vars);
 }
 
 describe('Codegen.generateAlgorithm', () => {
-  test('simple assignment uses __s and integer clamp', () => {
+  test('simple assignment uses __s and wraps INT to 16 bits', () => {
     const { code } = compile('Count := Count + 1;', [
       { name: 'Count', type: 'INT', direction: 'internal' },
     ]);
     expect(code).toContain('__s["Count"]');
-    expect(code).toMatch(/\| 0/);
+    expect(code).toContain('<< 16) >> 16');
   });
 
   test('mixed arithmetic with input and output', () => {
@@ -81,13 +86,30 @@ describe('Codegen.generateAlgorithm', () => {
     expect(code).toContain('__s["r"]');
   });
 
-  test('integer clamping is preserved', () => {
+  test('integer wrapping follows the target width', () => {
     const { code } = compile('out := a + b;', [
       { name: 'a', type: 'INT', direction: 'input' },
       { name: 'b', type: 'INT', direction: 'input' },
       { name: 'out', type: 'INT', direction: 'output' },
     ]);
-    expect(code).toMatch(/\) \| 0/);
+    expect(code).toBe('__s["out"] = ((__s["a"] + __s["b"]) << 16) >> 16;\n');
+    const dint = compile('out := a + b;', [
+      { name: 'a', type: 'DINT', direction: 'input' },
+      { name: 'b', type: 'DINT', direction: 'input' },
+      { name: 'out', type: 'DINT', direction: 'output' },
+    ]);
+    expect(dint.code).toMatch(/\) \| 0/);
+  });
+
+  test('an unanalyzed tree is emitted without wrapping (annotations only)', () => {
+    const src = 'Count := Count + 1;';
+    const lexer = new Lexer(src);
+    const parser = new Parser(lexer.tokenize(), src);
+    const ast = new ASTBuilder(src).build(parser.parseStatementList());
+    const { code } = new Codegen({ sourceMaps: false }).generateAlgorithm(ast, [
+      { name: 'Count', type: 'INT', direction: 'internal' },
+    ]);
+    expect(code).toBe('__s["Count"] = (__s["Count"] + 1);\n');
   });
 
   test('no bare descriptor identifiers in emitted body', () => {
@@ -101,12 +123,12 @@ describe('Codegen.generateAlgorithm', () => {
     expect(/\bout\b/.test(stripped)).toBe(false);
   });
 
-  test('REAL output skips integer clamp', () => {
+  test('REAL output skips integer wrapping', () => {
     const { code } = compile('r := a * 1.5;', [
       { name: 'a', type: 'REAL', direction: 'input' },
       { name: 'r', type: 'REAL', direction: 'output' },
     ]);
-    expect(code).not.toMatch(/\| 0/);
+    expect(code).toBe('__s["r"] = (__s["a"] * 1.5);\n');
   });
 
   test('executes correctly against a plain scope object', () => {

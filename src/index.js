@@ -39,7 +39,8 @@ function parse(source) {
 }
 
 /**
- * Validate an ST AST and return semantic errors.
+ * Validate an ST AST and return semantic errors. Runs the static typing pass,
+ * which annotates the tree in place (see `analyzeAlgorithm`).
  *
  * @param {import('./types').ASTNode} ast
  * @returns {{ valid: boolean, errors: import('./types').STError[] }}
@@ -59,10 +60,12 @@ function validate(ast) {
  * @param {boolean} [options.sourceMaps=true] - Include source map comments
  * @param {boolean} [options.strict=false] - Fail on warnings
  * @param {string} [options.filename='<input>'] - Source filename for error messages
+ * @param {'number'|'bigint'} [options.int64='number'] - Representation of LINT/ULINT/LWORD values
  * @returns {{ code: string, sourceMap: object, warnings: string[], errors: import('./types').STError[] }}
  */
 function compile(source, options = {}) {
   const { sourceMaps = true, strict = false, filename = '<input>' } = options;
+  const int64 = checkInt64Option(options);
 
   const { ast, errors: parseErrors } = parse(source);
 
@@ -77,7 +80,7 @@ function compile(source, options = {}) {
     return { code: '', sourceMap: null, warnings: [], errors: allErrors };
   }
 
-  const codegen = new Codegen({ sourceMaps, filename, source });
+  const codegen = new Codegen({ sourceMaps, filename, source, int64 });
   const { code, sourceMap, warnings } = codegen.generate(ast);
 
   return { code, sourceMap, warnings, errors: allErrors };
@@ -129,6 +132,102 @@ function parseAlgorithm(source) {
 }
 
 /**
+ * Run the static typing pass over an ST algorithm (bare statement list)
+ * against a host-supplied variable descriptor list. Accepts either source
+ * text or a tree returned by `parseAlgorithm`. The returned `ast` is the
+ * parsed tree annotated in place with `resolvedType`, `resolvedSymbol`,
+ * `constant`, and `conversion` (or `null` when parsing failed).
+ *
+ * Type violations are always errors; `options.strict` only promotes the
+ * remaining warnings (e.g. undeclared identifiers) to errors.
+ *
+ * @param {string|import('./types').ASTNode} sourceOrAst
+ * @param {import('./types').VariableDescriptor[]} variables
+ * @param {object} [options]
+ * @param {boolean} [options.strict=false]
+ * @returns {{ ast: import('./types').ASTNode|null, errors: import('./types').STError[], warnings: import('./types').STError[] }}
+ */
+function analyzeAlgorithm(sourceOrAst, variables, options = {}) {
+  return analyzeWith(parseAlgorithm, (validator, ast) => validator.validateAlgorithm(ast, variables),
+    sourceOrAst, variables, options);
+}
+
+/**
+ * Run the static typing pass over a single ST expression against a
+ * host-supplied variable descriptor list. Accepts either source text or a
+ * tree returned by `parseExpression`. See `analyzeAlgorithm`.
+ *
+ * @param {string|import('./types').ASTNode} sourceOrAst
+ * @param {import('./types').VariableDescriptor[]} variables
+ * @param {object} [options]
+ * @param {boolean} [options.strict=false]
+ * @returns {{ ast: import('./types').ASTNode|null, errors: import('./types').STError[], warnings: import('./types').STError[] }}
+ */
+function analyzeExpression(sourceOrAst, variables, options = {}) {
+  return analyzeWith(parseExpression, (validator, ast) => validator.validateExpression(ast, variables),
+    sourceOrAst, variables, options);
+}
+
+function analyzeWith(parseFn, validateFn, sourceOrAst, variables, options) {
+  const { strict = false } = options || {};
+
+  let ast = null;
+  let parseErrors = [];
+  if (typeof sourceOrAst === 'string') {
+    ({ ast, errors: parseErrors } = parseFn(sourceOrAst));
+  } else if (sourceOrAst && typeof sourceOrAst === 'object') {
+    ast = sourceOrAst;
+  } else {
+    return {
+      ast: null,
+      errors: [{ phase: 'parser', severity: 'error', message: 'Expected ST source text or a parsed AST', line: 1, column: 0 }],
+      warnings: [],
+    };
+  }
+
+  const fatal = parseErrors.some(e => e.severity === 'error');
+  if (!ast || fatal) {
+    return { ast: null, errors: parseErrors, warnings: [] };
+  }
+
+  if (!Array.isArray(variables)) {
+    return {
+      ast,
+      errors: [{
+        phase: 'validator', severity: 'error',
+        message: 'variables must be an array of VariableDescriptor',
+        line: 1, column: 0,
+      }],
+      warnings: [],
+    };
+  }
+
+  const validator = new Validator();
+  const diagnostics = validateFn(validator, ast);
+
+  const errors = [...parseErrors, ...diagnostics.filter(e => e.severity === 'error')];
+  const warnings = diagnostics.filter(e => e.severity === 'warning');
+
+  if (strict && warnings.length > 0) {
+    // Promote warnings to errors
+    for (const w of warnings) {
+      errors.push({ ...w, severity: 'error' });
+    }
+  }
+
+  return { ast, errors, warnings };
+}
+
+/** Validate the `int64` code generation option. */
+function checkInt64Option(options) {
+  const { int64 = 'number' } = options || {};
+  if (int64 !== 'number' && int64 !== 'bigint') {
+    throw new TypeError(`Invalid int64 option '${int64}': expected 'number' or 'bigint'`);
+  }
+  return int64;
+}
+
+/**
  * Compile an ST algorithm (bare statement list) to a JavaScript body string
  * that reads and writes a host-supplied scope object passed as `__s`.
  *
@@ -139,14 +238,18 @@ function parseAlgorithm(source) {
  * omitted from the result direction buckets in favour of each member's
  * effective access key bucketed by the member's `direction`.
  *
+ * The static typing pass (`analyzeAlgorithm`) runs first; any type violation
+ * is an error and yields empty `code`.
+ *
  * @param {string} source
  * @param {import('./types').VariableDescriptor[]} variables
  * @param {object} [options]
  * @param {boolean} [options.strict=false] - Promote warnings to errors
+ * @param {'number'|'bigint'} [options.int64='number'] - Representation of LINT/ULINT/LWORD values
  * @returns {import('./types').AlgorithmCompileResult}
  */
 function compileAlgorithm(source, variables, options = {}) {
-  const { strict = false } = options;
+  const int64 = checkInt64Option(options);
   const emptyResult = (errors, warnings = []) => ({
     code: '',
     inputNames: [],
@@ -156,38 +259,13 @@ function compileAlgorithm(source, variables, options = {}) {
     errors,
   });
 
-  if (!Array.isArray(variables)) {
-    return emptyResult([{
-      phase: 'validator', severity: 'error',
-      message: 'variables must be an array of VariableDescriptor',
-      line: 1, column: 0,
-    }]);
-  }
+  const { errors: allErrors, warnings: allWarnings, ast } = analyzeAlgorithm(source, variables, options);
 
-  const { ast, errors: parseErrors } = parseAlgorithm(source);
-  const fatal = parseErrors.some(e => e.severity === 'error');
-  if (!ast || fatal) {
-    return emptyResult(parseErrors);
-  }
-
-  const validator = new Validator();
-  const validateErrors = validator.validateAlgorithm(ast, variables);
-
-  const allErrors = [...parseErrors, ...validateErrors.filter(e => e.severity === 'error')];
-  const allWarnings = validateErrors.filter(e => e.severity === 'warning');
-
-  if (strict && allWarnings.length > 0) {
-    // Promote warnings to errors
-    for (const w of allWarnings) {
-      allErrors.push({ ...w, severity: 'error' });
-    }
-  }
-
-  if (allErrors.some(e => e.severity === 'error')) {
+  if (!ast || allErrors.some(e => e.severity === 'error')) {
     return emptyResult(allErrors, allWarnings);
   }
 
-  const codegen = new Codegen({ sourceMaps: false });
+  const codegen = new Codegen({ sourceMaps: false, int64 });
   const result = codegen.generateAlgorithm(ast, variables, options);
 
   return {
@@ -256,12 +334,18 @@ function parseExpression(source) {
  * reference to a composite descriptor (without `.<member>`) is a
  * validator-phase error.
  *
+ * The static typing pass (`analyzeExpression`) runs first; any type
+ * violation is an error and yields empty `code`.
+ *
  * @param {string} source
  * @param {import('./types').VariableDescriptor[]} variables
  * @param {object} [options]
+ * @param {boolean} [options.strict=false] - Promote warnings to errors
+ * @param {'number'|'bigint'} [options.int64='number'] - Representation of LINT/ULINT/LWORD values
  * @returns {import('./types').ExpressionCompileResult}
  */
 function compileExpression(source, variables, options = {}) {
+  const int64 = checkInt64Option(options);
   const emptyResult = (errors, warnings = []) => ({
     code: '',
     inputNames: [],
@@ -271,31 +355,13 @@ function compileExpression(source, variables, options = {}) {
     errors,
   });
 
-  if (!Array.isArray(variables)) {
-    return emptyResult([{
-      phase: 'validator', severity: 'error',
-      message: 'variables must be an array of VariableDescriptor',
-      line: 1, column: 0,
-    }]);
-  }
+  const { errors: allErrors, warnings: allWarnings, ast } = analyzeExpression(source, variables, options);
 
-  const { ast, errors: parseErrors } = parseExpression(source);
-  const fatal = parseErrors.some(e => e.severity === 'error');
-  if (!ast || fatal) {
-    return emptyResult(parseErrors);
-  }
-
-  const validator = new Validator();
-  const validateErrors = validator.validateExpression(ast, variables);
-
-  const allErrors = [...parseErrors, ...validateErrors.filter(e => e.severity === 'error')];
-  const allWarnings = validateErrors.filter(e => e.severity === 'warning');
-
-  if (allErrors.some(e => e.severity === 'error')) {
+  if (!ast || allErrors.some(e => e.severity === 'error')) {
     return emptyResult(allErrors, allWarnings);
   }
 
-  const codegen = new Codegen({ sourceMaps: false });
+  const codegen = new Codegen({ sourceMaps: false, int64 });
   const result = codegen.generateExpression(ast, variables, options);
 
   return {
@@ -312,6 +378,6 @@ function compileExpression(source, variables, options = {}) {
 
 module.exports = {
   parse, validate, compile, compileSync,
-  parseAlgorithm, compileAlgorithm,
-  parseExpression, compileExpression,
+  parseAlgorithm, compileAlgorithm, analyzeAlgorithm,
+  parseExpression, compileExpression, analyzeExpression,
 };

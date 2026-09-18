@@ -87,6 +87,13 @@ describe('Parser.parseStatementList (algorithm mode)', () => {
     expect(ast.statements[0].type).toBe(NodeType.REPEAT_STATEMENT);
   });
 
+  test('REPEAT / UNTIL / END_REPEAT', () => {
+    const { ast, errors } = parseAlgo('REPEAT x := x + 1; UNTIL x >= 10 END_REPEAT; y := 1;');
+    expect(errors.filter(e => e.severity === 'error')).toHaveLength(0);
+    expect(ast.statements[0].type).toBe(NodeType.REPEAT_STATEMENT);
+    expect(ast.statements).toHaveLength(2);
+  });
+
   test('function call statement', () => {
     const { ast, errors } = parseAlgo('ABS(x);');
     expect(errors.filter(e => e.severity === 'error')).toHaveLength(0);

@@ -15,6 +15,8 @@ const TokenType = {
   STRING_LITERAL: 'STRING_LITERAL',
   TIME_LITERAL: 'TIME_LITERAL',
   DATE_LITERAL: 'DATE_LITERAL',
+  // `<TYPE>#<value>` for an elementary type keyword; carries `typeName` and `valueText`
+  TYPED_LITERAL: 'TYPED_LITERAL',
 
   // Identifiers
   IDENTIFIER: 'IDENTIFIER',
@@ -147,6 +149,7 @@ const NodeType = {
   FUNCTION_BLOCK_DECLARATION: 'FunctionBlockDeclaration',
   PROGRAM_DECLARATION: 'ProgramDeclaration',
   TYPE_DECLARATION: 'TypeDeclaration',
+  TYPE_ALIAS_DECLARATION: 'TypeAliasDeclaration',
 
   // Variable sections
   VAR_SECTION: 'VarSection',
@@ -194,6 +197,7 @@ const NodeType = {
   TIME_LITERAL: 'TimeLiteral',
   DATE_LITERAL: 'DateLiteral',
   TYPED_LITERAL: 'TypedLiteral',
+  RANGE_LITERAL: 'RangeLiteral',
 
   // Misc
   NAMED_ARGUMENT: 'NamedArgument',
@@ -292,6 +296,8 @@ function makeError(phase, message, line, column, severity = 'error', code = unde
  * @property {string} type - ST type name of the member value
  * @property {'input'|'output'} direction
  * @property {string} [accessKey] - Override for the `__s` scope key. Defaults to `"<parent>.<name>"`.
+ * @property {number} [arraySize] - Element count of an array member (indices `0..arraySize-1`); non-negative integer
+ * @property {number} [stringLength] - Maximum character count of a STRING/WSTRING member; non-negative integer
  */
 
 /**
@@ -299,7 +305,16 @@ function makeError(phase, message, line, column, severity = 'error', code = unde
  * @property {string} name - ST variable name
  * @property {string} type - ST type name ('INT', 'BOOL', 'REAL', etc.)
  * @property {'input'|'output'|'internal'} direction
+ * @property {number} [arraySize] - Element count of an array of `type` (indices `0..arraySize-1`); non-negative integer
+ * @property {number} [stringLength] - Maximum character count of a STRING/WSTRING descriptor; non-negative integer
  * @property {VariableMemberDescriptor[]} [members] - When present, the descriptor is composite.
+ */
+
+/**
+ * @typedef {Object} AnalysisResult
+ * @property {ASTNode|null} ast - The tree annotated in place, or null when parsing failed
+ * @property {STError[]} errors
+ * @property {STError[]} warnings
  */
 
 /**

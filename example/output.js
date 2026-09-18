@@ -16,7 +16,7 @@ class CounterWithTimer {
     // ST line 28
     if (Reset) {
       // ST line 29
-      this.Count = (0) | 0;
+      this.Count = 0;
       // ST line 30
       this.Done = false;
       // ST line 31
@@ -29,17 +29,17 @@ class CounterWithTimer {
       // ST line 38
       if ((this.Count < MaxCount)) {
         // ST line 39
-        this.Count = ((this.Count + 1)) | 0;
+        this.Count = ((this.Count + 1) << 16) >> 16;
       } else {
         // ST line 41
         this.Done = true;
       }
       // ST line 45
-      this.Sum = (0) | 0;
+      this.Sum = 0;
       // ST line 46
-      for (this.i = (1) | 0; this.i <= (this.Count) | 0; this.i = (this.i + 1) | 0) {
+      for (this.i = 1; this.i <= (this.Count); this.i = ((this.i + 1) << 16) >> 16) {
         // ST line 47
-        this.Sum = ((this.Sum + this.i)) | 0;
+        this.Sum = ((this.Sum + this.i) << 16) >> 16;
       }
     }
   }
@@ -50,11 +50,11 @@ function TriangleNumber(N) {
   let i = 0; // INT
   let result = 0; // DINT
   // ST line 61
-  result = (0) | 0;
+  result = 0;
   // ST line 62
-  for (i = (1) | 0; i <= (N) | 0; i = (i + 1) | 0) {
+  for (i = 1; i <= (N); i = ((i + 1) << 16) >> 16) {
     // ST line 63
-    result = ((result + i)) | 0;
+    result = (result + i) | 0;
   }
   // ST line 65
   _result = (result) | 0;
@@ -94,7 +94,7 @@ function run() {
     TotalSum = (TriangleNumber(FB1.Count)) | 0;
   }
   // ST line 92
-  Cycles = ((Cycles + 1)) | 0;
+  Cycles = ((Cycles + 1) << 16) >> 16;
 }
 
 module.exports = { run, get FB1() { return FB1; }, get Cycles() { return Cycles; }, get TotalSum() { return TotalSum; } };

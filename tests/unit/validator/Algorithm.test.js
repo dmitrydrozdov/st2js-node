@@ -45,13 +45,16 @@ describe('Validator.validateAlgorithm', () => {
     expect(warningsOrErrors.length).toBeGreaterThan(0);
   });
 
-  test('type mismatch produces warning, not error', () => {
+  test('type mismatch is a validator error', () => {
     const errors = runValidator('R := S;', [
       { name: 'R', type: 'INT', direction: 'output' },
       { name: 'S', type: 'STRING', direction: 'input' },
     ]);
-    expect(errors.filter(e => e.severity === 'error')).toHaveLength(0);
-    expect(errors.filter(e => e.severity === 'warning').length).toBeGreaterThan(0);
+    const errs = errors.filter(e => e.severity === 'error');
+    expect(errs).toHaveLength(1);
+    expect(errs[0].phase).toBe('validator');
+    expect(errs[0].message).toMatch(/STRING/);
+    expect(errs[0].message).toMatch(/INT/);
   });
 
   test('standard function call is not flagged', () => {

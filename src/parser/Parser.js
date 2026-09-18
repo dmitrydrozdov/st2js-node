@@ -613,14 +613,16 @@ class Parser {
   _isAtCaseLabel() {
     const t0 = this.current();
     const t1 = this.peek(1);
-    // Simple: integer or identifier followed by colon, comma, or range
-    if (t0.type === TokenType.INTEGER_LITERAL || t0.type === TokenType.IDENTIFIER) {
-      return t1.type === TokenType.COLON || t1.type === TokenType.COMMA || t1.type === TokenType.RANGE;
+    const isBoundStart = t => t.type === TokenType.INTEGER_LITERAL ||
+      t.type === TokenType.TYPED_LITERAL || t.type === TokenType.IDENTIFIER;
+    const isLabelFollow = t => t.type === TokenType.COLON || t.type === TokenType.COMMA || t.type === TokenType.RANGE;
+    // Simple: integer, typed literal, or identifier followed by colon, comma, or range
+    if (isBoundStart(t0)) {
+      return isLabelFollow(t1);
     }
-    // Negative integer: '-' integer ':'
-    if (t0.type === TokenType.MINUS && t1.type === TokenType.INTEGER_LITERAL) {
-      const t2 = this.peek(2);
-      return t2.type === TokenType.COLON || t2.type === TokenType.COMMA;
+    // Negative bound: '-' (integer | typed literal) (':' | ',' | '..')
+    if (t0.type === TokenType.MINUS && (t1.type === TokenType.INTEGER_LITERAL || t1.type === TokenType.TYPED_LITERAL)) {
+      return isLabelFollow(this.peek(2));
     }
     return false;
   }
@@ -652,42 +654,59 @@ class Parser {
     return stmts;
   }
 
+  /**
+   * Parse one CASE selector value: a bound, or `lo..hi` where each bound is a
+   * signed integer literal, a typed literal, or an identifier.
+   */
   parseCaseValue() {
-    // Can be: integer literal, identifier (enum), or range lo..hi
+    const lo = this.parseCaseBound();
+    if (this.check(TokenType.RANGE)) {
+      this.advance(); // consume ..
+      const hi = this.parseCaseBound();
+      return { type: 'RangeLiteral', lo, hi, loc: this.combineLoc(lo, hi) };
+    }
+    return lo;
+  }
+
+  parseCaseBound() {
     const start = this.current();
-    let val;
+    let minusTok = null;
+    if (this.check(TokenType.MINUS)) {
+      minusTok = this.advance();
+    }
+    const tok = this.current();
 
-    if (this.checkAny(TokenType.INTEGER_LITERAL, TokenType.IDENTIFIER, TokenType.MINUS)) {
-      // Handle negative numbers in case
-      if (this.check(TokenType.MINUS)) {
-        const minusTok = this.advance();
-        const numTok = this.expect(TokenType.INTEGER_LITERAL);
-        val = {
-          type: 'IntegerLiteral',
-          value: -parseInt(numTok.value, 10),
-          raw: '-' + numTok.value,
-          loc: this.loc(minusTok, numTok),
-        };
-      } else {
-        val = this.advance();
-        val = val.type === TokenType.INTEGER_LITERAL
-          ? { type: 'IntegerLiteral', value: parseInt(val.value, 10), raw: val.value, loc: this.loc(val) }
-          : { type: 'IdentifierRef', name: val.value, loc: this.loc(val) };
+    if (tok.type === TokenType.INTEGER_LITERAL) {
+      this.advance();
+      const node = this.makeIntegerLiteral(tok, minusTok);
+      return node;
+    }
+    if (tok.type === TokenType.TYPED_LITERAL) {
+      this.advance();
+      const node = this.buildTypedLiteral(tok);
+      if (minusTok) {
+        if (node.value && node.value.type === 'IntegerLiteral') {
+          node.value.value = -node.value.value;
+          node.value.bigValue = -node.value.bigValue;
+          node.value.raw = '-' + node.value.raw;
+          node.raw = '-' + node.raw;
+          node.loc = this.loc(minusTok, tok);
+        } else {
+          this.error(`Cannot negate ${tok.typeName} literal in CASE label`, minusTok);
+        }
       }
-
-      if (this.check(TokenType.RANGE)) {
-        this.advance(); // consume ..
-        const hi = this.current();
-        this.advance();
-        const hiVal = { type: 'IntegerLiteral', value: parseInt(hi.value, 10), raw: hi.value, loc: this.loc(hi) };
-        return { type: 'RangeLiteral', lo: val, hi: hiVal, loc: this.loc(start, hi) };
-      }
-      return val;
+      return node;
+    }
+    if (tok.type === TokenType.IDENTIFIER && !minusTok) {
+      this.advance();
+      return { type: 'IdentifierRef', name: tok.value, loc: this.loc(tok) };
     }
 
-    this.error(`Expected case value, got '${start.value}'`);
-    this.advance();
-    return { type: 'IntegerLiteral', value: 0, raw: '0', loc: this.loc(start) };
+    this.error(`Expected case value, got '${tok.value}'`, tok);
+    if (tok.type !== TokenType.COLON && tok.type !== TokenType.COMMA && tok.type !== TokenType.RANGE) {
+      this.advance();
+    }
+    return { type: 'IntegerLiteral', value: 0, bigValue: 0n, raw: '0', loc: this.loc(start) };
   }
 
   parseForStatement() {
@@ -740,6 +759,8 @@ class Parser {
     const body = this._parseStatementsUntil([TokenType.UNTIL]);
     this.expect(TokenType.UNTIL);
     const condition = this.parseExpression();
+    this.match(TokenType.SEMICOLON);
+    this.match(TokenType.END_REPEAT);
     this.match(TokenType.SEMICOLON);
 
     return {
@@ -909,7 +930,7 @@ class Parser {
     // Literals
     if (this.check(TokenType.INTEGER_LITERAL)) {
       this.advance();
-      return { type: 'IntegerLiteral', value: parseIntLiteral(tok.value), raw: tok.value, loc: this.loc(tok) };
+      return this.makeIntegerLiteral(tok, null);
     }
     if (this.check(TokenType.REAL_LITERAL)) {
       this.advance();
@@ -925,11 +946,16 @@ class Parser {
     }
     if (this.check(TokenType.TIME_LITERAL)) {
       this.advance();
-      return { type: 'TimeLiteral', value: tok.value, ms: parseTimeLiteral(tok.value), loc: this.loc(tok) };
+      return { type: 'TimeLiteral', value: tok.value, ms: parseTimeLiteral(tok.value), raw: tok.value, loc: this.loc(tok) };
     }
     if (this.check(TokenType.DATE_LITERAL)) {
       this.advance();
-      return { type: 'DateLiteral', value: tok.value, loc: this.loc(tok) };
+      return { type: 'DateLiteral', value: tok.value, raw: tok.value, loc: this.loc(tok) };
+    }
+    // Typed literals: INT#42, REAL#3.14, BOOL#TRUE, WORD#16#FF, STRING#'a', TIME#1s, ...
+    if (this.check(TokenType.TYPED_LITERAL)) {
+      this.advance();
+      return this.buildTypedLiteral(tok);
     }
 
     // Identifier, function call, member access, array access
@@ -937,27 +963,130 @@ class Parser {
       return this.parseIdentifierOrCall();
     }
 
-    // Typed literals like INT#42, REAL#3.14
+    // A type name used as an expression (e.g. as a function argument).
+    // `<TYPE>#<value>` with no whitespace is lexed as a single TYPED_LITERAL
+    // token; a type keyword followed by a separate `#` is not a typed literal.
     if (this.isPrimitiveType(tok.type) || this.checkAny(TokenType.STRING_TYPE, TokenType.WSTRING_TYPE)) {
       this.advance();
-      if (this.check(TokenType.HASH)) {
-        this.advance();
-        const valTok = this.current();
-        const valExpr = this.parsePrimary();
-        return {
-          type: 'TypedLiteral',
-          typeName: tok.value.toUpperCase(),
-          value: valExpr,
-          loc: this.loc(tok, this.peek(-1)),
-        };
-      }
-      // It was just a type name used as an expression (rare but valid in some contexts)
       return { type: 'IdentifierRef', name: tok.value.toUpperCase(), loc: this.loc(tok) };
     }
 
     this.error(`Unexpected token in expression: '${tok.value}'`);
     this.advance();
-    return { type: 'IntegerLiteral', value: 0, raw: '0', loc: this.loc(tok) };
+    return { type: 'IntegerLiteral', value: 0, bigValue: 0n, raw: '0', loc: this.loc(tok) };
+  }
+
+  /**
+   * Build an IntegerLiteral node from an INTEGER_LITERAL token, optionally
+   * negated by a preceding '-' token (used for CASE labels).
+   */
+  makeIntegerLiteral(tok, minusTok) {
+    const parsed = parseIntegerText(tok.value);
+    if (!parsed) {
+      // The lexer has already reported the malformed literal (e.g. `16#`).
+      return { type: 'IntegerLiteral', value: 0, bigValue: 0n, raw: tok.value, loc: this.loc(tok) };
+    }
+    if (minusTok) {
+      return {
+        type: 'IntegerLiteral',
+        value: -parsed.value,
+        bigValue: -parsed.bigValue,
+        raw: '-' + tok.value,
+        loc: this.loc(minusTok, tok),
+      };
+    }
+    return { type: 'IntegerLiteral', value: parsed.value, bigValue: parsed.bigValue, raw: tok.value, loc: this.loc(tok) };
+  }
+
+  /**
+   * Build a TypedLiteral node from a TYPED_LITERAL token. The inner literal is
+   * parsed from `tok.valueText` with the ordinary literal rules for the type's
+   * class: optional sign and base prefix for integers, decimal/exponent for
+   * reals, TRUE/FALSE (or 0/1) for BOOL, a quoted string, or temporal text.
+   * A typed literal never yields an inner node with a `null` or `NaN` value:
+   * malformed text is reported as a parser error and replaced by a zero value.
+   */
+  buildTypedLiteral(tok) {
+    const typeName = tok.typeName;
+    const text = tok.valueText || '';
+    const loc = this.loc(tok);
+    // Location of the inner literal: after `<TYPE>#`
+    const prefixLen = tok.value.length - text.length;
+    const innerLoc = {
+      start: loc.start + prefixLen,
+      end: loc.end,
+      line: loc.line,
+      column: loc.column + prefixLen,
+      endLine: loc.endLine,
+      endColumn: loc.endColumn,
+    };
+    const fail = (message) => { this.error(message, tok); };
+
+    let value;
+    switch (typedLiteralClass(typeName)) {
+      case 'INTEGER': {
+        const parsed = parseIntegerText(text);
+        if (!parsed) {
+          fail(`Invalid ${typeName} literal '${tok.value}'`);
+          value = { type: 'IntegerLiteral', value: 0, bigValue: 0n, raw: text, loc: innerLoc };
+        } else {
+          value = { type: 'IntegerLiteral', value: parsed.value, bigValue: parsed.bigValue, raw: text, loc: innerLoc };
+        }
+        break;
+      }
+      case 'REAL': {
+        const clean = text.replace(/_/g, '');
+        if (!/^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(clean)) {
+          fail(`Invalid ${typeName} literal '${tok.value}'`);
+          value = { type: 'RealLiteral', value: 0, raw: text, loc: innerLoc };
+        } else {
+          value = { type: 'RealLiteral', value: parseFloat(clean), raw: text, loc: innerLoc };
+        }
+        break;
+      }
+      case 'BOOL': {
+        const upper = text.toUpperCase();
+        if (upper !== 'TRUE' && upper !== 'FALSE' && upper !== '1' && upper !== '0') {
+          fail(`Invalid BOOL literal '${tok.value}'`);
+        }
+        value = { type: 'BoolLiteral', value: upper === 'TRUE' || upper === '1', raw: text, loc: innerLoc };
+        break;
+      }
+      case 'STRING': {
+        const quote = text[0];
+        if ((quote !== '\'' && quote !== '"') || text.length < 2 || text[text.length - 1] !== quote) {
+          fail(`Invalid ${typeName} literal '${tok.value}'`);
+          value = { type: 'StringLiteral', value: '', raw: text, loc: innerLoc };
+        } else {
+          value = { type: 'StringLiteral', value: unescapeString(text), raw: text, loc: innerLoc };
+        }
+        break;
+      }
+      case 'TIME': {
+        if (!/^[+-]?(\d+(\.\d+)?(d|h|ms|m|s|us|ns)_?)+$/i.test(text)) {
+          fail(`Invalid TIME literal '${tok.value}'`);
+          value = { type: 'TimeLiteral', value: text, ms: 0, raw: text, loc: innerLoc };
+        } else {
+          value = { type: 'TimeLiteral', value: text, ms: parseTimeLiteral(text), raw: text, loc: innerLoc };
+        }
+        break;
+      }
+      default: {
+        // DATE, TIME_OF_DAY, DATE_AND_TIME
+        const patterns = {
+          DATE: /^\d{4}-\d{1,2}-\d{1,2}$/,
+          TIME_OF_DAY: /^\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?$/,
+          DATE_AND_TIME: /^\d{4}-\d{1,2}-\d{1,2}-\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?$/,
+        };
+        if (!patterns[typeName].test(text)) {
+          fail(`Invalid ${typeName} literal '${tok.value}'`);
+        }
+        value = { type: 'DateLiteral', value: text, raw: text, loc: innerLoc };
+        break;
+      }
+    }
+
+    return { type: 'TypedLiteral', typeName, value, raw: tok.value, loc };
   }
 
   parseIdentifierOrCall() {
@@ -1080,18 +1209,48 @@ class Parser {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function parseIntLiteral(raw) {
-  // Handle ST number bases: 16#FF, 8#77, 2#1010
-  const clean = raw.replace(/_/g, '');
-  if (clean.startsWith('16#') || clean.startsWith('16#')) return parseInt(clean.slice(3), 16);
-  if (clean.startsWith('8#')) return parseInt(clean.slice(2), 8);
-  if (clean.startsWith('2#')) return parseInt(clean.slice(2), 2);
-  return parseInt(clean, 10);
+/**
+ * Parse ST integer text (`[+-]?digits`, `[+-]?16#hex`, `8#octal`, `2#binary`,
+ * underscores allowed) into an exact `bigint` plus the nearest `number`.
+ * Returns null when the text is not a well-formed integer literal.
+ *
+ * @param {string} raw
+ * @returns {{ value: number, bigValue: bigint } | null}
+ */
+function parseIntegerText(raw) {
+  const clean = String(raw).replace(/_/g, '');
+  const m = /^([+-])?(?:(2|8|16)#)?([0-9A-Fa-f]+)$/.exec(clean);
+  if (!m) return null;
+  const sign = m[1] === '-' ? -1n : 1n;
+  const base = m[2] ? Number(m[2]) : 10;
+  const digits = m[3];
+  const valid = { 2: /^[01]+$/, 8: /^[0-7]+$/, 10: /^[0-9]+$/, 16: /^[0-9A-Fa-f]+$/ }[base];
+  if (!valid.test(digits)) return null;
+  const prefix = { 2: '0b', 8: '0o', 10: '', 16: '0x' }[base];
+  const bigValue = sign * BigInt(prefix + digits);
+  return { value: Number(bigValue), bigValue };
+}
+
+/** Scanning/parsing class for a typed-literal type name (mirrors the lexer). */
+function typedLiteralClass(typeName) {
+  switch (typeName) {
+    case 'BOOL': return 'BOOL';
+    case 'REAL': case 'LREAL': return 'REAL';
+    case 'TIME': return 'TIME';
+    case 'DATE': case 'TIME_OF_DAY': case 'DATE_AND_TIME': return 'DATE';
+    case 'STRING': case 'WSTRING': return 'STRING';
+    default: return 'INTEGER';
+  }
 }
 
 function parseTimeLiteral(raw) {
-  // T#1h30m20s500ms -> milliseconds
-  const s = raw.replace(/^(T|TIME)#/i, '');
+  // T#1h30m20s500ms -> milliseconds (optionally negative)
+  let s = raw.replace(/^(T|TIME)#/i, '');
+  let sign = 1;
+  if (s[0] === '-' || s[0] === '+') {
+    if (s[0] === '-') sign = -1;
+    s = s.slice(1);
+  }
   let ms = 0;
   const pattern = /(\d+(?:\.\d+)?)(d|h|m(?!s)|s|ms|us|ns)/gi;
   let match;
@@ -1108,7 +1267,7 @@ function parseTimeLiteral(raw) {
       case 'ns': ms += val / 1000000; break;
     }
   }
-  return ms;
+  return sign * ms;
 }
 
 function unescapeString(raw) {
@@ -1124,3 +1283,4 @@ function unescapeString(raw) {
 }
 
 module.exports = Parser;
+module.exports.parseIntegerText = parseIntegerText;

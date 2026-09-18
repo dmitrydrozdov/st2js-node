@@ -46,7 +46,7 @@ class Counter {
     // ST line 5
     if (EN) {
       // ST line 6
-      this.Count = (this.Count + 1) | 0;
+      this.Count = ((this.Count + 1) << 16) >> 16;
     }
   }
 }
@@ -63,6 +63,7 @@ Compiles an ST source string to JavaScript.
 - `options.sourceMaps: boolean` — Include `// ST line N` comments (default: `true`)
 - `options.filename: string` — Source filename for error messages (default: `'<input>'`)
 - `options.strict: boolean` — Fail on warnings (default: `false`)
+- `options.int64: 'number' | 'bigint'` — Representation of `LINT`, `ULINT`, and `LWORD` values (default: `'number'`; see [64-bit integers](#64-bit-integers))
 
 **Returns:**
 ```typescript
@@ -94,7 +95,9 @@ const { ast, errors } = parse(stSource);
 
 ### `validate(ast)`
 
-Performs semantic validation on a parsed AST.
+Performs semantic validation on a parsed AST. This runs the static typing
+pass, so the tree is annotated in place (see [Static typing](#static-typing)).
+Type violations are reported as errors.
 
 ```javascript
 const { validate } = require('st2js');
@@ -155,7 +158,20 @@ Descriptor rules:
 - `direction: 'output'` and `'internal'` variables can be read and written.
 - Descriptor names must be unique; duplicates are a validator error.
 - `type` is a plain ST type string (`'INT'`, `'BOOL'`, `'REAL'`, `'STRING'`, ...).
-  Integer types receive the same `| 0` 32-bit truncation as POU-mode codegen.
+  Every write to an integer-typed variable is wrapped at the declared width
+  (see [Data Types](#data-types)).
+- `arraySize` (optional, non-negative integer) makes the descriptor an array
+  of `type` indexed from `0` to `arraySize - 1`, matching the IEC 61499
+  `ArraySize` attribute. `A[i]` is then typed as the element type, and a
+  constant index outside the range is a validator error. The host supplies a
+  JavaScript array as the scope value.
+- `stringLength` (optional, non-negative integer) records the maximum
+  character count of a `STRING`/`WSTRING` descriptor on the resolved symbol.
+- A negative or non-integer `arraySize` or `stringLength` is a validator error.
+- The algorithm is statically typed before code generation; any type violation
+  (see [Type rules](#type-rules)) is a `validator`-phase error and `code` is empty.
+- `options.strict` promotes the remaining warnings (undeclared identifiers) to
+  errors; `options.int64` selects the representation of 64-bit integers.
 
 A matching `parseAlgorithm(source)` is exposed for hosts that want to do their own
 validation or codegen — it returns `{ ast, errors }` and skips the validator pass.
@@ -195,6 +211,8 @@ const result = compileAlgorithm(
 `VariableMemberDescriptor` rules:
 
 - `name`, `type`, and `direction: 'input' | 'output'` are required.
+- `arraySize` and `stringLength` are accepted with the same meaning as on a
+  flat descriptor.
 - `accessKey` overrides the runtime scope-object key. The default is
   `"<parentName>.<memberName>"` — note the dot is part of the literal key on
   `__s`, not a property dereference.
@@ -272,6 +290,123 @@ above for `compileAlgorithm`. For example,
 `compileExpression('P.REQ AND count < threshold', [...])` with a composite
 `P` descriptor emits `(__s["P.REQ"] && (__s["count"] < __s["threshold"]))`.
 
+### Static typing
+
+Every compile entry point runs one static typing pass before code
+generation. Hosts that need the resolved types themselves (for example a
+device compiler emitting precompiled code from the AST) call it directly:
+
+- `analyzeAlgorithm(sourceOrAst, variables, options?)`
+- `analyzeExpression(sourceOrAst, variables, options?)`
+
+Both accept either source text or a tree returned by `parseAlgorithm` /
+`parseExpression`, and return `{ ast, errors, warnings }` where `ast` is the
+parsed tree **annotated in place** (or `null` when parsing failed).
+`options.strict` has the same meaning as for `compileAlgorithm`; type
+violations are errors regardless of options.
+
+```javascript
+const { analyzeAlgorithm } = require('st2js');
+
+const { ast, errors } = analyzeAlgorithm('OUT := IN + DINT#1;', [
+  { name: 'IN',  type: 'INT',  direction: 'input' },
+  { name: 'OUT', type: 'DINT', direction: 'output' },
+]);
+
+const value = ast.statements[0].value;   // the BinaryExpr `IN + DINT#1`
+value.resolvedType;                       // 'DINT'
+value.left.resolvedSymbol;                // { kind: 'descriptor', name: 'IN', type: 'INT', direction: 'input', ... }
+value.left.conversion;                    // { from: 'INT', to: 'DINT', implicit: true }
+value.right.constant;                     // { type: 'DINT', value: 1n }
+```
+
+The annotations written onto expression nodes are:
+
+| Annotation | Set on | Value |
+|---|---|---|
+| `resolvedType` | every expression node | an elementary type name (`'DINT'`, `'BOOL'`, ...), a user type name, an array descriptor `{ kind: 'array', element, size, lo }`, or `null` when the expression could not be resolved |
+| `resolvedSymbol` | identifiers and member accesses | the descriptor, composite member (with its `accessKey`), or POU variable the name resolved to |
+| `constant` | literals, typed literals, negated literals | `{ type, value }`; integer values are exact `bigint`s, reals and `TIME` (milliseconds) are numbers |
+| `conversion` | operands and assigned values adapted by an implicit widening | `{ from, to, implicit: true }` |
+
+Untyped literals take the type their context requires (`x := 7;` with `x: UINT`
+types the literal `UINT`; `count < 5` types `5` as `count`'s type) and default
+to `DINT` (integers) or `REAL` (reals) otherwise. Typed literals keep their
+declared type.
+
+#### Type rules
+
+The pass applies the IEC 61131-3 implicit-conversion rules. Only conversions
+that cannot lose information are implicit, and they are recorded as
+`conversion` annotations:
+
+- a narrower integer to a wider integer of the same signedness (`INT` → `DINT`);
+- an unsigned integer to a strictly wider signed integer (`USINT` → `INT`);
+- a bit string to a wider bit string, `BOOL` to any bit string, and a bit
+  string to an unsigned integer of the same or wider width (`WORD` → `UINT`);
+- `REAL` → `LREAL`, and an integer to a real type that represents every value
+  of it (`INT` → `REAL`, `DINT` → `LREAL`);
+- `STRING` → `WSTRING`.
+
+Everything else is a `validator`-phase **error**, `code` is empty, and no
+option downgrades it:
+
+- assignment of a wider or real value to a narrower or integer target
+  (`OUT := R;` with `R: LREAL`, `OUT: DINT` — use `LREAL_TO_DINT(R)`);
+- arithmetic or comparison mixing signed and unsigned integers;
+- comparison of incompatible types (`flag < 3` with `flag: BOOL`);
+- `MOD` on non-integers; `AND`/`OR`/`XOR`/`NOT` on operands that are neither
+  `BOOL` nor bit strings;
+- non-`BOOL` conditions in `IF`, `ELSIF`, `WHILE`, and `REPEAT ... UNTIL`;
+- non-integer array indices, and constant indices outside `0..arraySize-1`;
+- literals outside the range of their type (`SINT#200`, `u := -1` with `u: UINT`);
+- calls to unknown standard functions, calls with the wrong number of
+  arguments, and arguments that do not satisfy a function's parameter classes.
+
+Undeclared identifiers keep their previous severity (a warning in algorithm
+mode, an error in expression mode), and an expression containing an
+unresolved name is typed as `null` without further diagnostics, so one missing
+name never cascades.
+
+#### Typed literals
+
+`<TYPE>#<value>` is accepted for every elementary type keyword: `BOOL`, the
+integer types, the bit-string types, `REAL`/`LREAL`, `TIME`, `DATE`,
+`TIME_OF_DAY`/`TOD`, `DATE_AND_TIME`/`DT`, `STRING`, and `WSTRING`. The value
+follows the ordinary literal rules for the type: an optional sign and base
+prefix for integers (`DINT#-5`, `WORD#16#FF`, `BYTE#2#1010`), decimal and
+exponent for reals (`LREAL#1.5e3`), `TRUE`/`FALSE` (`BOOL#TRUE`), a quoted
+string (`STRING#'a'`), and temporal text (`TIME#1s`, `DT#2024-01-01-00:00:00`).
+The parser produces a `TypedLiteral` node whose `value` is the fully parsed
+inner literal, and the generated code contains the value (`DINT#1` → `1`,
+`WORD#16#FF` → `255`, `BOOL#TRUE` → `true`). Every integer literal, typed or
+not, carries an exact `bigValue` (`bigint`) next to `value` (`number`), so
+`9007199254740993` is preserved exactly.
+
+#### 64-bit integers
+
+`LINT`, `ULINT`, and `LWORD` values are never truncated to 32 bits. Their
+JavaScript representation follows the `int64` option of `compile`,
+`compileAlgorithm`, and `compileExpression`:
+
+- `'number'` (default): JavaScript numbers, truncated toward zero with
+  `Math.trunc` and no width wrap. Values are exact up to ±2^53; larger
+  literals round to the nearest double, and bitwise operators on `LWORD`
+  act on the low 32 bits only.
+- `'bigint'`: `bigint` values wrapped at 64 bits with `BigInt.asIntN` /
+  `BigInt.asUintN`, 64-bit literals emitted as `123n`, and narrower operands
+  cast with `BigInt(...)` where they meet a 64-bit value. The host must supply
+  `bigint` scope values for variables of those types (and 64-bit-aware
+  implementations of any standard functions applied to them).
+
+```javascript
+compileAlgorithm('L := L + 1;', [{ name: 'L', type: 'LINT', direction: 'internal' }]).code;
+// '__s["L"] = Math.trunc(__s["L"] + 1);\n'
+
+compileAlgorithm('L := L + 1;', [{ name: 'L', type: 'LINT', direction: 'internal' }], { int64: 'bigint' }).code;
+// '__s["L"] = BigInt.asIntN(64, __s["L"] + 1n);\n'
+```
+
 ### Error Object
 
 All error-producing functions return `STError` objects:
@@ -311,17 +446,43 @@ All error-producing functions return `STError` objects:
 
 ### Data Types
 
-| ST Type | JavaScript | Notes |
-|---|---|---|
-| `BOOL` | `boolean` | `true`/`false` |
-| `SINT`, `INT`, `DINT`, `LINT` | `number` | Integer with `\| 0` clamping |
-| `USINT`, `UINT`, `UDINT`, `ULINT` | `number` | Unsigned integer |
-| `REAL`, `LREAL` | `number` | IEEE 754 double |
-| `STRING`, `WSTRING` | `string` | JS string |
-| `TIME` | `number` | Milliseconds |
-| `ARRAY[lo..hi] OF T` | `Array` | JS Array |
-| `STRUCT ... END_STRUCT` | `class` | JS class with constructor |
-| User-defined types | `class` | `new TypeName()` |
+Every value written to an integer-typed variable, loop variable, or function
+result is wrapped at the declared width, so arithmetic follows IEC 61131-3
+integer semantics (`127 + 1` stored in a `SINT` is `-128`). Division of two
+integer operands truncates toward zero (`Math.trunc(a / b)`).
+
+| ST Type | JavaScript | Width | Generated wrap |
+|---|---|---|---|
+| `BOOL` | `boolean` | — | — |
+| `SINT` | `number` | 8-bit signed | `((x) << 24) >> 24` |
+| `USINT`, `BYTE` | `number` | 8-bit unsigned | `(x) & 0xFF` |
+| `INT` | `number` | 16-bit signed | `((x) << 16) >> 16` |
+| `UINT`, `WORD` | `number` | 16-bit unsigned | `(x) & 0xFFFF` |
+| `DINT` | `number` | 32-bit signed | `(x) \| 0` |
+| `UDINT`, `DWORD` | `number` | 32-bit unsigned | `(x) >>> 0` |
+| `LINT`, `ULINT`, `LWORD` | `number` or `bigint` | 64-bit | `Math.trunc(x)` (`int64: 'number'`), `BigInt.asIntN(64, x)` / `BigInt.asUintN(64, x)` (`int64: 'bigint'`) |
+| `REAL`, `LREAL` | `number` | IEEE 754 double | — |
+| `STRING`, `WSTRING` | `string` | — | — |
+| `TIME` | `number` | milliseconds | — |
+| `DATE`, `TIME_OF_DAY`, `DATE_AND_TIME` | `number` | placeholder `0` | — |
+| `ARRAY[lo..hi] OF T` | `Array` | — | element writes wrap as `T` |
+| `STRUCT ... END_STRUCT` | `class` | — | JS class with constructor |
+| User-defined types | `class` | — | `new TypeName()` |
+
+`AND`, `OR`, `XOR`, and `NOT` are boolean on `BOOL` operands and bitwise
+(`&`, `|`, `^`, `~` masked to the width) on bit-string operands.
+
+### Literals
+
+| ST | Examples |
+|---|---|
+| Integer (decimal, `2#`, `8#`, `16#`) | `42`, `2#1010`, `8#77`, `16#FF` |
+| Real | `3.14`, `1.5e-3` |
+| Boolean | `TRUE`, `FALSE` |
+| String | `'hello'`, `"wide"`, `'line$nbreak'` |
+| Time | `T#1h30m`, `TIME#500ms` |
+| Date and time of day | `D#2024-01-01`, `DATE#2024-01-01`, `TOD#12:30:00`, `DT#2024-01-01-12:30:00` |
+| Typed | `DINT#1`, `INT#-5`, `WORD#16#FF`, `REAL#2.5`, `BOOL#TRUE`, `STRING#'a'` |
 
 ### Control Flow
 
@@ -383,11 +544,18 @@ const { TON, TOF, TP } = require('st2js/src/runtime/TimerBlocks');
 
 ### Standard Library Functions
 
-Math: `ABS`, `SQRT`, `LN`, `LOG`, `EXP`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2`
+Math: `ABS` (`ANY_NUM`), `SQRT`, `LN`, `LOG`, `EXP`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2`, `EXPT` (`ANY_REAL`), `TRUNC`
 Numeric: `MAX`, `MIN`, `LIMIT`, `SEL`, `MUX`
 String: `LEN`, `LEFT`, `RIGHT`, `MID`, `CONCAT`, `INSERT`, `DELETE`, `REPLACE`, `FIND`
-Bit: `SHL`, `SHR`, `ROL`, `ROR`
-Type conversions: `INT_TO_REAL`, `REAL_TO_INT`, `BOOL_TO_INT`, etc.
+Bit: `SHL`, `SHR`, `ROL`, `ROR` (`ANY_BIT`)
+Type conversions: `<FROM>_TO_<TO>` for every pair of elementary types (`INT_TO_REAL`, `REAL_TO_DINT`, `LREAL_TO_DINT`, `TIME_TO_DINT`, ...)
+
+Calls are checked against each function's signature (argument count and
+parameter classes) and typed by its result rule, e.g. `ABS(v)` has `v`'s type,
+`LEN(s)` is `INT`, and `MAX(i, d)` has the common type of its arguments.
+Generated code calls the functions by name; `src/runtime/StandardFunctions.js`
+ships implementations for a subset of the conversions, and hosts supply the
+rest.
 
 ## Using Compiled Output
 
@@ -431,6 +599,8 @@ npm test:integration  # Run integration tests only
 
 ## Known Limitations
 
+- **64-bit integers** in the default `int64: 'number'` mode are exact only up to ±2^53, and bitwise operators on `LWORD` act on the low 32 bits; use `int64: 'bigint'` for full 64-bit semantics
+- **Intermediate results** are wrapped only when stored (assignment, loop variable, function result), not after every operation
 - **REAL division** does not enforce PLC-style saturation semantics
 - **TIME arithmetic** uses JavaScript `Date.now()` for timers; accuracy depends on JS event loop
 - **STRING** functions operate on JS UTF-16 strings, not null-terminated fixed-length arrays

@@ -9,6 +9,8 @@ describe('Integration: compileExpression', () => {
     const mod = require('../../src/index');
     expect(typeof mod.parseExpression).toBe('function');
     expect(typeof mod.compileExpression).toBe('function');
+    expect(typeof mod.analyzeExpression).toBe('function');
+    expect(typeof mod.analyzeAlgorithm).toBe('function');
   });
 
   test('produces a JS expression usable with new Function("__s", "return " + code)', () => {
@@ -58,8 +60,12 @@ describe('Integration: compileExpression', () => {
           const out = {
             parseExpression: typeof m.parseExpression,
             compileExpression: typeof m.compileExpression,
+            analyzeExpression: typeof m.analyzeExpression,
+            analyzeAlgorithm: typeof m.analyzeAlgorithm,
             defaultParseExpression: typeof m.default.parseExpression,
             defaultCompileExpression: typeof m.default.compileExpression,
+            defaultAnalyzeAlgorithm: typeof m.default.analyzeAlgorithm,
+            analyzedType: m.analyzeExpression('1 + 2', []).ast.resolvedType,
           };
           process.stdout.write(JSON.stringify(out));
         })
@@ -72,5 +78,9 @@ describe('Integration: compileExpression', () => {
     expect(parsed.compileExpression).toBe('function');
     expect(parsed.defaultParseExpression).toBe('function');
     expect(parsed.defaultCompileExpression).toBe('function');
+    expect(parsed.analyzeExpression).toBe('function');
+    expect(parsed.analyzeAlgorithm).toBe('function');
+    expect(parsed.defaultAnalyzeAlgorithm).toBe('function');
+    expect(parsed.analyzedType).toBe('DINT');
   });
 });

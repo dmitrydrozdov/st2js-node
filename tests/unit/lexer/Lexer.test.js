@@ -128,10 +128,12 @@ describe('Lexer', () => {
       expect(tokens[0].value).toBe('T#500ms');
     });
 
-    test('TIME#1h30m', () => {
+    test('TIME#1h30m is a typed literal of type TIME', () => {
       const { tokens } = tokenize('TIME#1h30m');
-      expect(tokens[0].type).toBe(TokenType.TIME_LITERAL);
+      expect(tokens[0].type).toBe(TokenType.TYPED_LITERAL);
       expect(tokens[0].value).toBe('TIME#1h30m');
+      expect(tokens[0].typeName).toBe('TIME');
+      expect(tokens[0].valueText).toBe('1h30m');
     });
   });
 
@@ -207,10 +209,98 @@ describe('Lexer', () => {
   });
 
   describe('typed literals', () => {
+    function typed(src) {
+      const { tokens, errors } = tokenize(src);
+      expect(errors).toHaveLength(0);
+      expect(tokens).toHaveLength(2); // literal + EOF
+      expect(tokens[0].type).toBe(TokenType.TYPED_LITERAL);
+      expect(tokens[0].value).toBe(src);
+      return tokens[0];
+    }
+
     test('INT#42', () => {
-      const { tokens } = tokenize('INT#42');
-      expect(tokens[0].type).toBe(TokenType.INTEGER_LITERAL);
-      expect(tokens[0].value).toBe('INT#42');
+      const tok = typed('INT#42');
+      expect(tok.typeName).toBe('INT');
+      expect(tok.valueText).toBe('42');
+    });
+
+    test.each([
+      ['DINT#1', 'DINT', '1'],
+      ['DINT#-5', 'DINT', '-5'],
+      ['INT#+42', 'INT', '+42'],
+      ['WORD#16#FF', 'WORD', '16#FF'],
+      ['BYTE#2#1010', 'BYTE', '2#1010'],
+      ['LWORD#16#FFFFFFFFFFFFFFFF', 'LWORD', '16#FFFFFFFFFFFFFFFF'],
+      ['REAL#2.5', 'REAL', '2.5'],
+      ['LREAL#1.5e3', 'LREAL', '1.5e3'],
+      ['REAL#-1.5E-3', 'REAL', '-1.5E-3'],
+      ['BOOL#TRUE', 'BOOL', 'TRUE'],
+      ['BOOL#0', 'BOOL', '0'],
+      ["STRING#'a'", 'STRING', "'a'"],
+      ['WSTRING#"w"', 'WSTRING', '"w"'],
+      ['TIME#1s', 'TIME', '1s'],
+      ['TIME#-1h30m', 'TIME', '-1h30m'],
+      ['DATE#2024-01-01', 'DATE', '2024-01-01'],
+      ['TOD#12:30:00.500', 'TIME_OF_DAY', '12:30:00.500'],
+      ['TIME_OF_DAY#12:30:00', 'TIME_OF_DAY', '12:30:00'],
+      ['DT#2024-01-01-00:00:00', 'DATE_AND_TIME', '2024-01-01-00:00:00'],
+      ['DATE_AND_TIME#2024-01-01-00:00:00', 'DATE_AND_TIME', '2024-01-01-00:00:00'],
+      ['SINT#1', 'SINT', '1'], ['LINT#1', 'LINT', '1'], ['USINT#1', 'USINT', '1'],
+      ['UINT#1', 'UINT', '1'], ['UDINT#1', 'UDINT', '1'], ['ULINT#1', 'ULINT', '1'],
+      ['DWORD#1', 'DWORD', '1'],
+    ])('%s lexes as TYPED_LITERAL %s with value text %s', (src, typeName, valueText) => {
+      const tok = typed(src);
+      expect(tok.typeName).toBe(typeName);
+      expect(tok.valueText).toBe(valueText);
+    });
+
+    test('type keywords are case-insensitive and normalised', () => {
+      const tok = typed('dint#7');
+      expect(tok.typeName).toBe('DINT');
+      expect(tok.valueText).toBe('7');
+    });
+
+    test('typed literal stops at the end of the value', () => {
+      const types = tokenTypes('DINT#1 + 2');
+      expect(types).toEqual([TokenType.TYPED_LITERAL, TokenType.PLUS, TokenType.INTEGER_LITERAL, TokenType.EOF]);
+    });
+
+    test('typed literals on both sides of a range', () => {
+      const types = tokenTypes('DINT#1..DINT#9');
+      expect(types).toEqual([TokenType.TYPED_LITERAL, TokenType.RANGE, TokenType.TYPED_LITERAL, TokenType.EOF]);
+    });
+
+    test('an integer typed literal does not swallow an exponent', () => {
+      const types = tokenTypes('INT#1e5');
+      expect(types[0]).toBe(TokenType.TYPED_LITERAL);
+      expect(types[1]).toBe(TokenType.IDENTIFIER);
+    });
+
+    test('missing value after # is a lexer error', () => {
+      const { tokens, errors } = tokenize('DINT#;');
+      expect(tokens[0].type).toBe(TokenType.TYPED_LITERAL);
+      expect(tokens[0].valueText).toBe('');
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].message).toMatch(/DINT/);
+    });
+
+    test('whitespace between type and # is not a typed literal', () => {
+      const types = tokenTypes('INT # 42');
+      expect(types).toEqual([TokenType.INT, TokenType.HASH, TokenType.INTEGER_LITERAL, TokenType.EOF]);
+    });
+
+    test('identifier-prefixed literal still lexes as IDENTIFIER HASH IDENTIFIER', () => {
+      const types = tokenTypes('Colour#Red');
+      expect(types).toEqual([TokenType.IDENTIFIER, TokenType.HASH, TokenType.IDENTIFIER, TokenType.EOF]);
+    });
+
+    test('T#1s and D#2024-01-01 still lex as before', () => {
+      const t = tokenize('T#1s').tokens[0];
+      expect(t.type).toBe(TokenType.TIME_LITERAL);
+      expect(t.value).toBe('T#1s');
+      const d = tokenize('D#2024-01-01').tokens[0];
+      expect(d.type).toBe(TokenType.DATE_LITERAL);
+      expect(d.value).toBe('D#2024-01-01');
     });
   });
 
@@ -220,9 +310,11 @@ describe('Lexer', () => {
       expect(tokens[0].type).toBe(TokenType.DATE_LITERAL);
     });
 
-    test('DATE#2024-01-01', () => {
+    test('DATE#2024-01-01 is a typed literal of type DATE', () => {
       const { tokens } = tokenize('DATE#2024-01-01');
-      expect(tokens[0].type).toBe(TokenType.DATE_LITERAL);
+      expect(tokens[0].type).toBe(TokenType.TYPED_LITERAL);
+      expect(tokens[0].typeName).toBe('DATE');
+      expect(tokens[0].valueText).toBe('2024-01-01');
     });
   });
 

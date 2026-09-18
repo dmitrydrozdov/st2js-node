@@ -1,8 +1,13 @@
 'use strict';
 
 /**
- * @fileoverview Maps IEC 61131-3 ST types to JavaScript equivalents.
+ * @fileoverview Maps IEC 61131-3 ST types to JavaScript equivalents: default
+ * values, JS type names, and the width-correct integer wrapping forms used by
+ * the code generator. The type classification itself comes from the shared
+ * type model in src/analysis/types.js.
  */
+
+const Types = require('../analysis/types');
 
 const INTEGER_TYPES = new Set([
   'SINT', 'INT', 'DINT', 'LINT',
@@ -70,13 +75,20 @@ function isString(typeName) {
   return STRING_TYPES.has(typeName);
 }
 
+/** Whether a type is a 64-bit integer or bit-string type (LINT, ULINT, LWORD). */
+function is64Bit(typeName) {
+  return Types.is64Bit(typeName);
+}
+
 /**
  * Get the JavaScript default value for a given ST type.
  * @param {string} typeName - ST type name (e.g. 'INT', 'BOOL', 'REAL')
+ * @param {'number'|'bigint'} [int64='number'] - representation of 64-bit integer types
  * @returns {string} JavaScript literal string for the default value
  */
-function getDefaultValue(typeName) {
+function getDefaultValue(typeName, int64 = 'number') {
   if (typeName === 'BOOL') return 'false';
+  if (int64 === 'bigint' && is64Bit(typeName)) return '0n';
   if (defaultValues[typeName] !== undefined) return String(defaultValues[typeName]);
   // Unknown / user-defined type: default to null
   return 'null';
@@ -97,10 +109,101 @@ function getJSType(typeName) {
 }
 
 /**
- * Check if integer operations on this type should use |0 clamping.
+ * Check if integer operations on this type should be wrapped at the type's width.
  */
 function needsIntegerClamp(typeName) {
   return isInteger(typeName) || isBit(typeName);
+}
+
+/**
+ * Whether `expr` is enclosed in one matching pair of outer parentheses.
+ * Conservative: may answer false for a parenthesized expression containing
+ * string literals with unbalanced parentheses, never true for an
+ * unparenthesized one.
+ */
+function isParenthesized(expr) {
+  if (expr.length < 2 || expr[0] !== '(' || expr[expr.length - 1] !== ')') return false;
+  let depth = 0;
+  for (let i = 0; i < expr.length; i++) {
+    if (expr[i] === '(') depth++;
+    else if (expr[i] === ')') depth--;
+    if (depth === 0 && i < expr.length - 1) return false;
+  }
+  return depth === 0;
+}
+
+/** `expr` wrapped in parentheses unless it already is. */
+function parenthesize(expr) {
+  return isParenthesized(expr) ? expr : `(${expr})`;
+}
+
+/** `expr` with one redundant outer pair of parentheses removed. */
+function unparenthesize(expr) {
+  return isParenthesized(expr) ? expr.slice(1, -1) : expr;
+}
+
+/**
+ * Wrap a JavaScript expression so that its value is reduced to the declared
+ * width and signedness of an integer or bit-string type:
+ *
+ *   SINT  ((x) << 24) >> 24     USINT/BYTE  (x) & 0xFF
+ *   INT   ((x) << 16) >> 16     UINT/WORD   (x) & 0xFFFF
+ *   DINT  (x) | 0               UDINT/DWORD (x) >>> 0
+ *   LINT/ULINT/LWORD  Math.trunc(x) in number mode (no width wrap);
+ *                     BigInt.asIntN(64, x) / BigInt.asUintN(64, x) in bigint mode
+ *
+ * Non-integer types are returned unchanged.
+ * @param {string} expr
+ * @param {string} typeName
+ * @param {'number'|'bigint'} [int64='number']
+ * @returns {string}
+ */
+function wrapInteger(expr, typeName, int64 = 'number') {
+  const p = parenthesize(expr);
+  const bare = unparenthesize(expr);
+  switch (typeName) {
+    case 'SINT': return `(${p} << 24) >> 24`;
+    case 'USINT': case 'BYTE': return `${p} & 0xFF`;
+    case 'INT': return `(${p} << 16) >> 16`;
+    case 'UINT': case 'WORD': return `${p} & 0xFFFF`;
+    case 'DINT': return `${p} | 0`;
+    case 'UDINT': case 'DWORD': return `${p} >>> 0`;
+    case 'LINT':
+      return int64 === 'bigint' ? `BigInt.asIntN(64, ${bare})` : `Math.trunc(${bare})`;
+    case 'ULINT': case 'LWORD':
+      return int64 === 'bigint' ? `BigInt.asUintN(64, ${bare})` : `Math.trunc(${bare})`;
+    default:
+      return expr;
+  }
+}
+
+/**
+ * Bitwise complement of a bit-string value, masked to the type's width.
+ * @param {string} expr
+ * @param {string} typeName
+ * @param {'number'|'bigint'} [int64='number']
+ */
+function bitwiseNot(expr, typeName, int64 = 'number') {
+  const bare = unparenthesize(expr);
+  switch (typeName) {
+    case 'BYTE': return `(~(${bare})) & 0xFF`;
+    case 'WORD': return `(~(${bare})) & 0xFFFF`;
+    case 'DWORD': return `(~(${bare})) >>> 0`;
+    case 'LWORD': return int64 === 'bigint' ? `BigInt.asUintN(64, ~(${bare}))` : `(~(${bare}))`;
+    default: return `(~(${bare}))`;
+  }
+}
+
+/**
+ * JavaScript literal for an exact integer value of the given type.
+ * @param {bigint} value
+ * @param {string} typeName
+ * @param {'number'|'bigint'} [int64='number']
+ * @returns {string}
+ */
+function integerLiteral(value, typeName, int64 = 'number') {
+  if (int64 === 'bigint' && is64Bit(typeName)) return `${value}n`;
+  return String(Number(value));
 }
 
 module.exports = {
@@ -110,9 +213,15 @@ module.exports = {
   isNumeric,
   isTime,
   isString,
+  is64Bit,
   getDefaultValue,
   getJSType,
   needsIntegerClamp,
+  wrapInteger,
+  bitwiseNot,
+  integerLiteral,
+  parenthesize,
+  unparenthesize,
   INTEGER_TYPES,
   REAL_TYPES,
   BIT_TYPES,

@@ -2,10 +2,15 @@
 
 /**
  * @fileoverview JavaScript code generator for IEC 61131-3 Structured Text ASTs.
- * Walks the AST produced by the parser and emits equivalent JavaScript code.
+ * Walks an AST that the static typing pass has annotated (`resolvedType`,
+ * `constant`, `conversion`, `resolvedSymbol`) and emits equivalent JavaScript.
+ * Codegen performs no type inference of its own: literal values come from
+ * `constant`, integer wrapping is keyed by `resolvedType`, and 64-bit
+ * boundary casts come from `conversion`.
  */
 
 const { NodeType, VarKind } = require('../types');
+const Types = require('../analysis/types');
 const TypeMapper = require('./TypeMapper');
 
 class Codegen {
@@ -13,11 +18,13 @@ class Codegen {
     this.sourceMaps = options.sourceMaps !== false;
     this.filename = options.filename || '<input>';
     this.source = options.source || '';
+    // Representation of LINT/ULINT/LWORD values: 'number' (default) or 'bigint'
+    this.int64 = options.int64 === 'bigint' ? 'bigint' : 'number';
     this.warnings = [];
     this._indent = 0;
     this._lines = [];
-    // Track variable types: name -> type string
-    this._varTypes = new Map();
+    // Nesting depth of CASE statements lowered to if-chains (temp naming)
+    this._caseDepth = 0;
     // Track which variables are FB/class instances: name -> class name
     this._fbInstanceVarTypes = new Map();
     // Track which variables belong to `this` in a function block
@@ -79,7 +86,6 @@ class Codegen {
 
     const prevInAlgo = this._inAlgo;
     const prevAlgoVars = this._algoScopeVars;
-    const prevVarTypes = new Map(this._varTypes);
     const prevInFB = this._inFB;
     const prevComposite = this._compositeDescriptors;
 
@@ -101,7 +107,6 @@ class Codegen {
     // Restore state
     this._inAlgo = prevInAlgo;
     this._algoScopeVars = prevAlgoVars;
-    this._varTypes = prevVarTypes;
     this._inFB = prevInFB;
     this._compositeDescriptors = prevComposite;
 
@@ -131,7 +136,6 @@ class Codegen {
 
     const prevInAlgo = this._inAlgo;
     const prevAlgoVars = this._algoScopeVars;
-    const prevVarTypes = new Map(this._varTypes);
     const prevInFB = this._inFB;
     const prevComposite = this._compositeDescriptors;
 
@@ -146,7 +150,6 @@ class Codegen {
 
     this._inAlgo = prevInAlgo;
     this._algoScopeVars = prevAlgoVars;
-    this._varTypes = prevVarTypes;
     this._inFB = prevInFB;
     this._compositeDescriptors = prevComposite;
 
@@ -192,14 +195,12 @@ class Codegen {
             direction: m.direction,
             accessKey,
           });
-          this._varTypes.set(accessKey, String(m.type || '').toUpperCase());
           if (m.direction === 'input') inputNames.push(accessKey);
           else if (m.direction === 'output') outputNames.push(accessKey);
         }
         this._compositeDescriptors.set(v.name.toUpperCase(), memberMap);
       } else {
         this._algoScopeVars.add(v.name);
-        this._varTypes.set(v.name, String(v.type).toUpperCase());
         if (v.direction === 'input') inputNames.push(v.name);
         else if (v.direction === 'output') outputNames.push(v.name);
         else if (v.direction === 'internal') internalNames.push(v.name);
@@ -216,6 +217,7 @@ class Codegen {
   _resolveCompositeMember(node) {
     if (!this._inAlgo) return null;
     if (!node || node.type !== NodeType.MEMBER_ACCESS) return null;
+    if (node.resolvedSymbol && node.resolvedSymbol.kind === 'member') return node.resolvedSymbol;
     if (!node.object || node.object.type !== NodeType.IDENTIFIER_REF) return null;
     const map = this._compositeDescriptors.get(String(node.object.name).toUpperCase());
     if (!map) return null;
@@ -299,7 +301,6 @@ class Codegen {
     const prevInFB = this._inFB;
     const prevFBVars = this._fbInstanceVars;
     const prevFBInputs = this._fbInputParams;
-    const prevVarTypes = new Map(this._varTypes);
     const prevFBInstanceVarTypes = new Map(this._fbInstanceVarTypes);
 
     this._inFB = true;
@@ -310,7 +311,6 @@ class Codegen {
     for (const v of [...locals, ...outputs]) {
       this._fbInstanceVars.add(v.name);
       const typeName = this._getVarTypeName(v);
-      this._varTypes.set(v.name, typeName);
       if (this._isClassType(typeName)) {
         this._fbInstanceVarTypes.set(v.name, typeName);
       }
@@ -318,8 +318,6 @@ class Codegen {
     // Input params (passed to call())
     for (const v of [...inputs, ...inouts]) {
       this._fbInputParams.add(v.name);
-      const typeName = this._getVarTypeName(v);
-      this._varTypes.set(v.name, typeName);
     }
 
     // Constructor: initialize instance vars
@@ -360,7 +358,6 @@ class Codegen {
     this._inFB = prevInFB;
     this._fbInstanceVars = prevFBVars;
     this._fbInputParams = prevFBInputs;
-    this._varTypes = prevVarTypes;
     this._fbInstanceVarTypes = prevFBInstanceVarTypes;
   }
 
@@ -376,7 +373,6 @@ class Codegen {
 
     const prevReturnType = this._returnType;
     const prevFunctionName = this._functionName;
-    const prevVarTypes = new Map(this._varTypes);
     const prevInFB = this._inFB;
     this._inFB = false;
 
@@ -384,24 +380,14 @@ class Codegen {
     this._returnType = returnTypeName;
     this._functionName = name;
 
-    const retDefault = TypeMapper.getDefaultValue(returnTypeName);
+    const retDefault = TypeMapper.getDefaultValue(returnTypeName, this.int64);
     this._emit(`let _result = ${retDefault}; // return value (${returnTypeName})`);
-
-    // Register return var under function name for assignment detection
-    this._varTypes.set(name, returnTypeName);
-    this._varTypes.set('_result', returnTypeName);
 
     // Locals and output vars
     for (const v of [...locals, ...outputs]) {
       const defVal = this._getVarDefault(v);
       const typeName = this._getVarTypeName(v);
       this._emit(`let ${v.name} = ${defVal}; // ${typeName}`);
-      this._varTypes.set(v.name, typeName);
-    }
-
-    // Register inputs
-    for (const v of [...inputs, ...inouts]) {
-      this._varTypes.set(v.name, this._getVarTypeName(v));
     }
 
     // Body
@@ -416,7 +402,6 @@ class Codegen {
 
     this._returnType = prevReturnType;
     this._functionName = prevFunctionName;
-    this._varTypes = prevVarTypes;
     this._inFB = prevInFB;
   }
 
@@ -426,7 +411,6 @@ class Codegen {
     const name = node.name;
     this._emit(`// Program: ${name}`);
 
-    const prevVarTypes = new Map(this._varTypes);
     const prevInFB = this._inFB;
     this._inFB = false;
 
@@ -437,7 +421,6 @@ class Codegen {
       const typeName = this._getVarTypeName(v);
       const defVal = this._getVarDefault(v);
       this._emit(`let ${v.name} = ${defVal}; // ${typeName}`);
-      this._varTypes.set(v.name, typeName);
       if (this._isClassType(typeName)) {
         this._fbInstanceVarTypes.set(v.name, typeName);
       }
@@ -461,7 +444,6 @@ class Codegen {
       this._emit('module.exports = { run };');
     }
 
-    this._varTypes = prevVarTypes;
     this._inFB = prevInFB;
   }
 
@@ -554,7 +536,7 @@ class Codegen {
     if (this._isClassType(typeName)) {
       return `new ${typeName}()`;
     }
-    return TypeMapper.getDefaultValue(typeName);
+    return TypeMapper.getDefaultValue(typeName, this.int64);
   }
 
   /** Returns true if typeName is a user-defined class/FB type (not a primitive) */
@@ -582,27 +564,39 @@ class Codegen {
   _genAssignment(node) {
     const target = this._genExprLhs(node.target);
     const value = this._genExpr(node.value);
-    const targetType = this._inferType(node.target);
 
     // Check if assigning to function name (return value in FUNCTION context)
     if (!this._inFB && this._functionName &&
         node.target.type === NodeType.IDENTIFIER_REF &&
         node.target.name === this._functionName) {
-      if (TypeMapper.needsIntegerClamp(this._returnType)) {
-        this._emit(`_result = (${value}) | 0;`);
-      } else {
-        this._emit(`_result = ${value};`);
-      }
+      const returnType = node.target.resolvedType || this._returnType;
+      this._emit(`_result = ${this._wrapValue(value, returnType, node.value)};`);
       return;
     }
 
-    if (TypeMapper.needsIntegerClamp(targetType)) {
-      this._emit(`${target} = (${value}) | 0;`);
-    } else if (targetType === 'REAL' || targetType === 'LREAL') {
-      this._emit(`${target} = ${value};`);
-    } else {
-      this._emit(`${target} = ${value};`);
-    }
+    this._emit(`${target} = ${this._wrapValue(value, node.target.resolvedType, node.value)};`);
+  }
+
+  /**
+   * Wrap a value written to a slot of type `typeName` at the declared width
+   * (integer and bit-string types); other types are stored as-is. A constant
+   * that already lies within the type's range needs no wrap.
+   */
+  _wrapValue(expr, typeName, valueNode = null) {
+    if (!Types.isIntegerLike(typeName)) return expr;
+    const c = valueNode && valueNode.constant;
+    if (c && typeof c.value === 'bigint' && Types.fitsInType(c.value, typeName)) return expr;
+    return TypeMapper.wrapInteger(expr, typeName, this.int64);
+  }
+
+  /** JavaScript literal for an integer constant of the given type. */
+  _intLiteral(value, typeName) {
+    return TypeMapper.integerLiteral(value, typeName, this.int64);
+  }
+
+  /** Whether values of `typeName` are represented as bigint in the current mode. */
+  _isBigInt(typeName) {
+    return this.int64 === 'bigint' && TypeMapper.is64Bit(typeName);
   }
 
   _genIf(node) {
@@ -639,21 +633,49 @@ class Codegen {
     this._emit('}');
   }
 
+  // Largest constant CASE range expanded into individual `case` labels.
+  static get MAX_CASE_RANGE_EXPANSION() { return 1024; }
+
+  /** Exact integer value of a constant CASE bound, or null when not constant. */
+  _constantInteger(node) {
+    if (!node) return null;
+    if (node.constant && typeof node.constant.value === 'bigint') return node.constant.value;
+    if (node.type === NodeType.INTEGER_LITERAL && typeof node.bigValue === 'bigint') return node.bigValue;
+    if (node.type === NodeType.TYPED_LITERAL) return this._constantInteger(node.value);
+    return null;
+  }
+
+  /** Whether a CASE range can be expanded into `case` labels. */
+  _isExpandableRange(val) {
+    const lo = this._constantInteger(val.lo);
+    const hi = this._constantInteger(val.hi);
+    if (lo === null || hi === null) return false;
+    return hi < lo || hi - lo < BigInt(Codegen.MAX_CASE_RANGE_EXPANSION);
+  }
+
   _genCase(node) {
     const expr = this._genExpr(node.discriminant);
+    const clauses = node.clauses || [];
+    const needsChain = clauses.some(c => (c.values || []).some(v =>
+      v.type === NodeType.RANGE_LITERAL && !this._isExpandableRange(v)));
+    if (needsChain) {
+      this._genCaseChain(node, expr);
+      return;
+    }
+
+    const selType = node.discriminant.resolvedType;
     this._emit(`switch (${expr}) {`);
     this._pushIndent();
 
-    for (const clause of node.clauses || []) {
+    for (const clause of clauses) {
       for (const val of clause.values || []) {
-        if (val.type === 'RangeLiteral') {
+        if (val.type === NodeType.RANGE_LITERAL) {
           // Expand range into individual cases
-          if (val.lo.type === NodeType.INTEGER_LITERAL && val.hi.type === NodeType.INTEGER_LITERAL) {
-            for (let i = val.lo.value; i <= val.hi.value; i++) {
-              this._emit(`case ${i}:`);
-            }
-          } else {
-            this._emit(`case ${this._genExpr(val.lo)}: // range ..${this._genExpr(val.hi)}`);
+          const lo = this._constantInteger(val.lo);
+          const hi = this._constantInteger(val.hi);
+          const labelType = (val.lo.constant && val.lo.constant.type) || selType;
+          for (let i = lo; i <= hi; i += 1n) {
+            this._emit(`case ${this._intLiteral(i, labelType)}:`);
           }
         } else {
           this._emit(`case ${this._genExpr(val)}:`);
@@ -683,17 +705,67 @@ class Codegen {
     this._emit('}');
   }
 
+  /**
+   * Lower a CASE statement whose labels include a range with non-constant
+   * bounds (e.g. `LO..HI`) to an if/else-if chain over a temporary.
+   */
+  _genCaseChain(node, expr) {
+    const tmp = `__st_case${this._caseDepth}`;
+    this._caseDepth++;
+    this._emit('{');
+    this._pushIndent();
+    this._emit(`const ${tmp} = ${expr};`);
+
+    let first = true;
+    for (const clause of node.clauses || []) {
+      const conds = (clause.values || []).map(val => {
+        if (val.type === NodeType.RANGE_LITERAL) {
+          return `(${tmp} >= ${this._genExpr(val.lo)} && ${tmp} <= ${this._genExpr(val.hi)})`;
+        }
+        return `${tmp} === ${this._genExpr(val)}`;
+      });
+      this._emit(`${first ? 'if' : '} else if'} (${conds.join(' || ')}) {`);
+      first = false;
+      this._pushIndent();
+      for (const stmt of clause.body || []) {
+        this._emitLineComment(stmt);
+        this._genNode(stmt);
+      }
+      this._popIndent();
+    }
+
+    if (node.elseClause) {
+      this._emit(first ? 'if (true) {' : '} else {');
+      first = false;
+      this._pushIndent();
+      for (const stmt of node.elseClause.body || []) {
+        this._emitLineComment(stmt);
+        this._genNode(stmt);
+      }
+      this._popIndent();
+    }
+
+    if (!first) this._emit('}');
+    this._popIndent();
+    this._emit('}');
+    this._caseDepth--;
+  }
+
   _genFor(node) {
     const varRef = this._genExprLhs(node.variable);
+    const varType = node.variable.resolvedType;
     const from = this._genExpr(node.from);
     const to = this._genExpr(node.to);
-    const step = node.by ? this._genExpr(node.by) : '1';
-    const stepIsLiteral = !node.by;
+    const wrap = (e) => this._wrapValue(e, varType);
+    const init = this._wrapValue(from, varType, node.from);
+    const one = Types.isIntegerLike(varType) ? this._intLiteral(1n, varType) : '1';
+    const zero = Types.isIntegerLike(varType) ? this._intLiteral(0n, varType) : '0';
 
-    if (stepIsLiteral) {
-      this._emit(`for (${varRef} = (${from}) | 0; ${varRef} <= (${to}) | 0; ${varRef} = (${varRef} + 1) | 0) {`);
+    if (!node.by) {
+      this._emit(`for (${varRef} = ${init}; ${varRef} <= (${to}); ${varRef} = ${wrap(`${varRef} + ${one}`)}) {`);
     } else {
-      this._emit(`for (${varRef} = (${from}) | 0; (${step}) > 0 ? ${varRef} <= (${to}) | 0 : ${varRef} >= (${to}) | 0; ${varRef} = (${varRef} + (${step})) | 0) {`);
+      const step = this._genExpr(node.by);
+      this._emit(`for (${varRef} = ${init}; (${step}) > ${zero} ? ${varRef} <= (${to}) : ${varRef} >= (${to}); ${varRef} = ${wrap(`${varRef} + (${step})`)}) {`);
     }
     this._pushIndent();
     for (const stmt of node.body || []) {
@@ -769,13 +841,46 @@ class Codegen {
 
   _genExpr(node) {
     if (!node) return 'undefined';
+    const code = this._genExprInner(node);
+    return this._applyConversion(node, code);
+  }
+
+  /**
+   * Apply the implicit conversion recorded on `node` by the typing pass. In
+   * `number` mode widening needs no code; in `bigint` mode a narrower integer
+   * meeting a 64-bit type is cast with `BigInt(...)`.
+   */
+  _applyConversion(node, code) {
+    const conv = node.conversion;
+    if (!conv || this.int64 !== 'bigint') return code;
+    if (TypeMapper.is64Bit(conv.to) && !TypeMapper.is64Bit(conv.from)) {
+      return `BigInt(${TypeMapper.unparenthesize(code)})`;
+    }
+    return code;
+  }
+
+  /** Emit a literal from its `constant` annotation (falls back to the parsed value). */
+  _genConstant(node) {
+    const c = node.constant;
+    if (!c) return null;
+    const v = c.value;
+    if (typeof v === 'bigint') return this._intLiteral(v, c.type);
+    if (typeof v === 'number') return String(v);
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    if (Types.isAnyDate(c.type)) return `/* ${c.type}: ${v} */ 0`;
+    if (typeof v === 'string' && Types.isAnyString(c.type)) return JSON.stringify(v);
+    return null;
+  }
+
+  _genExprInner(node) {
+    const constant = this._genConstant(node);
 
     switch (node.type) {
       case NodeType.INTEGER_LITERAL:
-        return String(node.value);
+        return constant !== null ? constant : String(node.value);
 
       case NodeType.REAL_LITERAL:
-        return String(node.value);
+        return constant !== null ? constant : String(node.value);
 
       case NodeType.BOOL_LITERAL:
         return node.value ? 'true' : 'false';
@@ -784,13 +889,17 @@ class Codegen {
         return JSON.stringify(node.value);
 
       case NodeType.TIME_LITERAL:
-        return String(node.ms !== undefined ? node.ms : node.value);
+        return constant !== null ? constant : String(node.ms !== undefined ? node.ms : node.value);
 
       case NodeType.DATE_LITERAL:
-        return `/* DATE: ${node.value} */ 0`;
+        return constant !== null ? constant : `/* DATE: ${node.value} */ 0`;
 
       case NodeType.TYPED_LITERAL:
-        return this._genExpr(node.value);
+        // Elementary typed literals fold to a constant; user-typed literals
+        // (enumeration values) emit their inner expression.
+        return constant !== null && Types.isElementary(node.resolvedType)
+          ? constant
+          : this._genExpr(node.value);
 
       case NodeType.IDENTIFIER_REF:
         return this._varRef(node.name);
@@ -821,7 +930,7 @@ class Codegen {
       case NodeType.NAMED_ARGUMENT:
         return node.value ? this._genExpr(node.value) : 'undefined';
 
-      case 'RangeLiteral':
+      case NodeType.RANGE_LITERAL:
         return this._genExpr(node.lo); // fallback
 
       default:
@@ -834,13 +943,24 @@ class Codegen {
     const left = this._genExpr(node.left);
     const right = this._genExpr(node.right);
     const op = node.operator;
+    const resultType = node.resolvedType;
 
-    if (op === 'AND') return `(${left} && ${right})`;
-    if (op === 'OR')  return `(${left} || ${right})`;
-    if (op === 'XOR') {
-      const lt = this._inferType(node.left);
-      if (lt === 'BOOL') return `(!!(${left}) !== !!(${right}))`;
-      return `((${left}) ^ (${right}))`;
+    if (op === 'AND' || op === 'OR' || op === 'XOR') {
+      // Boolean operators on BOOL, bitwise on bit-string types (per the typing pass).
+      if (Types.isBitString(resultType)) {
+        const jsOp = op === 'AND' ? '&' : op === 'OR' ? '|' : '^';
+        const raw = `(${left} ${jsOp} ${right})`;
+        return resultType === 'DWORD' ? `(${raw} >>> 0)` : raw;
+      }
+      if (op === 'AND') return `(${left} && ${right})`;
+      if (op === 'OR')  return `(${left} || ${right})`;
+      return `(!!(${left}) !== !!(${right}))`;
+    }
+
+    if (op === '/' && Types.isIntegerLike(resultType)) {
+      // Integer division truncates toward zero; bigint division already does.
+      if (this._isBigInt(resultType)) return `(${left} / ${right})`;
+      return `Math.trunc(${left} / ${right})`;
     }
 
     const opMap = {
@@ -858,8 +978,8 @@ class Codegen {
     const operand = this._genExpr(node.operand);
     switch (node.operator) {
       case 'NOT': {
-        const t = this._inferType(node.operand);
-        return t === 'BOOL' ? `!(${operand})` : `(~(${operand}))`;
+        const t = node.resolvedType || node.operand.resolvedType;
+        return Types.isBitString(t) ? TypeMapper.bitwiseNot(operand, t, this.int64) : `!(${operand})`;
       }
       case '-': return `(-(${operand}))`;
       case '+': return `(+(${operand}))`;
@@ -900,42 +1020,6 @@ class Codegen {
     });
 
     return `${callee}(${args.join(', ')})`;
-  }
-
-  // ─── Type Inference ───────────────────────────────────────────────────────
-
-  _inferType(node) {
-    if (!node) return 'INT';
-    switch (node.type) {
-      case NodeType.IDENTIFIER_REF:
-        return this._varTypes.get(node.name) || 'INT';
-      case NodeType.INTEGER_LITERAL:  return 'INT';
-      case NodeType.REAL_LITERAL:     return 'REAL';
-      case NodeType.BOOL_LITERAL:     return 'BOOL';
-      case NodeType.STRING_LITERAL:   return 'STRING';
-      case NodeType.TIME_LITERAL:     return 'TIME';
-      case NodeType.TYPED_LITERAL:    return node.typeName ? node.typeName.toUpperCase() : 'INT';
-      case NodeType.BINARY_EXPR: {
-        if (['=', '<>', '<', '<=', '>', '>=', 'AND', 'OR', 'XOR'].includes(node.operator)) {
-          return 'BOOL';
-        }
-        const lt = this._inferType(node.left);
-        const rt = this._inferType(node.right);
-        if (TypeMapper.isReal(lt) || TypeMapper.isReal(rt)) return 'REAL';
-        return lt;
-      }
-      case NodeType.UNARY_EXPR:
-        if (node.operator === 'NOT') return 'BOOL';
-        return this._inferType(node.operand);
-      case NodeType.MEMBER_ACCESS: {
-        const member = this._resolveCompositeMember(node);
-        if (member && member.type) return member.type;
-        return 'INT'; // conservative
-      }
-      case NodeType.ARRAY_ACCESS:     return 'INT'; // conservative
-      case NodeType.FUNCTION_CALL:    return 'INT'; // conservative
-      default:                        return 'INT';
-    }
   }
 }
 

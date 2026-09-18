@@ -101,6 +101,33 @@ const KEYWORDS = new Map([
   ['FALSE', TokenType.BOOL_LITERAL],
 ]);
 
+// Elementary type keywords that form typed literals (`<TYPE>#<value>`), mapped
+// to their canonical type name. `T#` and `D#` remain plain TIME/DATE literals.
+const TYPED_LITERAL_TYPES = new Map([
+  ['BOOL', 'BOOL'],
+  ['SINT', 'SINT'], ['INT', 'INT'], ['DINT', 'DINT'], ['LINT', 'LINT'],
+  ['USINT', 'USINT'], ['UINT', 'UINT'], ['UDINT', 'UDINT'], ['ULINT', 'ULINT'],
+  ['BYTE', 'BYTE'], ['WORD', 'WORD'], ['DWORD', 'DWORD'], ['LWORD', 'LWORD'],
+  ['REAL', 'REAL'], ['LREAL', 'LREAL'],
+  ['TIME', 'TIME'],
+  ['DATE', 'DATE'],
+  ['TIME_OF_DAY', 'TIME_OF_DAY'], ['TOD', 'TIME_OF_DAY'],
+  ['DATE_AND_TIME', 'DATE_AND_TIME'], ['DT', 'DATE_AND_TIME'],
+  ['STRING', 'STRING'], ['WSTRING', 'WSTRING'],
+]);
+
+/** Scanning class for a typed-literal type name. */
+function typedLiteralClass(typeName) {
+  switch (typeName) {
+    case 'BOOL': return 'BOOL';
+    case 'REAL': case 'LREAL': return 'REAL';
+    case 'TIME': return 'TIME';
+    case 'DATE': case 'TIME_OF_DAY': case 'DATE_AND_TIME': return 'DATE';
+    case 'STRING': case 'WSTRING': return 'STRING';
+    default: return 'INTEGER';
+  }
+}
+
 // Characters that are valid identifier starts
 function isIdStart(ch) {
   return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch === '_';
@@ -306,17 +333,19 @@ class Lexer {
       break;
     }
 
-    // Check for time/date literal prefix: T#, TIME#, D#, DATE#
+    // Check for the short time/date literal prefixes T# and D#. The long forms
+    // (TIME#, DATE#) are typed literals like every other elementary type keyword.
     if (this.pos < this.source.length && this.peek() === '#') {
-      if (upper === 'T' || upper === 'TIME') {
+      if (upper === 'T') {
         return this.readTimeLiteral(start);
       }
-      if (upper === 'D' || upper === 'DATE') {
+      if (upper === 'D') {
         return this.readDateLiteral(start);
       }
-      // Typed literal: INT#42, REAL#3.14, etc.
-      if (KEYWORDS.has(upper) && this.isTypeName(upper)) {
-        return this.readTypedLiteral(start, upper);
+      // Typed literal: INT#42, REAL#3.14, BOOL#TRUE, STRING#'a', DT#..., etc.
+      const typedName = TYPED_LITERAL_TYPES.get(upper);
+      if (typedName) {
+        return this.readTypedLiteral(start, typedName);
       }
     }
 
@@ -327,18 +356,6 @@ class Lexer {
     }
 
     return this.makeToken(TokenType.IDENTIFIER, raw, start, this.pos);
-  }
-
-  isTypeName(upper) {
-    switch (upper) {
-      case 'BOOL': case 'BYTE': case 'WORD': case 'DWORD': case 'LWORD':
-      case 'SINT': case 'INT': case 'DINT': case 'LINT':
-      case 'USINT': case 'UINT': case 'UDINT': case 'ULINT':
-      case 'REAL': case 'LREAL':
-        return true;
-      default:
-        return false;
-    }
   }
 
   // ─── Time Literal ──────────────────────────────────────────────────────────
@@ -378,54 +395,111 @@ class Lexer {
 
   // ─── Typed Literal ────────────────────────────────────────────────────────
 
+  /**
+   * Lex the value part of `<TYPE>#<value>`. The type keyword and `#` have
+   * already been consumed up to (but not including) the `#`. The value text
+   * is scanned according to the type's class so the parser can build the
+   * inner literal with the ordinary literal rules.
+   */
   readTypedLiteral(start, typeName) {
+    const hashTok = this.makeToken(TokenType.HASH, '#', this.pos, this.pos + 1);
     this.advance(); // consume #
-    // Read the literal value after the hash - could be a number, bool, or sign + number
     const valStart = this.pos;
-    const ch = this.peek();
+    const cls = typedLiteralClass(typeName);
 
-    if (ch === '+' || ch === '-') {
+    switch (cls) {
+      case 'STRING': {
+        if (this.peek() === '\'' || this.peek() === '"') {
+          this.readString(); // advances; reports unterminated strings itself
+        }
+        break;
+      }
+      case 'BOOL': {
+        while (this.pos < this.source.length && isIdPart(this.peek())) this.advance();
+        break;
+      }
+      case 'TIME': {
+        if (this.peek() === '+' || this.peek() === '-') this.advance();
+        while (this.pos < this.source.length) {
+          const ch = this.peek();
+          if (isDigit(ch) || ch === '.' || ch === '_' ||
+              (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+            this.advance();
+          } else {
+            break;
+          }
+        }
+        break;
+      }
+      case 'DATE': {
+        // DATE: YYYY-MM-DD; TIME_OF_DAY: HH:MM:SS(.fff); DATE_AND_TIME: YYYY-MM-DD-HH:MM:SS(.fff)
+        while (this.pos < this.source.length) {
+          const ch = this.peek();
+          if (isDigit(ch) || ch === '-' || ch === ':' || ch === '.') {
+            this.advance();
+          } else {
+            break;
+          }
+        }
+        break;
+      }
+      case 'REAL': {
+        if (this.peek() === '+' || this.peek() === '-') this.advance();
+        this.scanDigits(isDigit);
+        if (this.peek() === '.' && this.pos + 1 < this.source.length && isDigit(this.peek(1))) {
+          this.advance();
+          this.scanDigits(isDigit);
+        }
+        this.scanExponent();
+        break;
+      }
+      default: {
+        // Integer and bit-string types: [sign] digits | [sign] base#digits
+        if (this.peek() === '+' || this.peek() === '-') this.advance();
+        this.scanDigits(isDigit);
+        if (this.peek() === '#' && this.pos + 1 < this.source.length && isHexDigit(this.peek(1))) {
+          this.advance(); // base separator
+          this.scanDigits(isHexDigit);
+        }
+        break;
+      }
+    }
+
+    const valueText = this.source.slice(valStart, this.pos);
+    const raw = this.source.slice(start, this.pos);
+    const tok = this.makeToken(TokenType.TYPED_LITERAL, raw, start, this.pos);
+    tok.typeName = typeName;
+    tok.valueText = valueText;
+    if (valueText.length === 0) {
+      this.addError(`Expected a ${typeName} literal value after '#'`, hashTok.line, hashTok.column);
+    }
+    return tok;
+  }
+
+  /** Consume a run of characters accepted by `pred` (underscores allowed as digit separators). */
+  scanDigits(pred) {
+    while (this.pos < this.source.length && (pred(this.peek()) || this.peek() === '_')) {
       this.advance();
     }
+  }
 
+  /** Consume `[eE][+-]?digits` if present; otherwise leave the position unchanged. */
+  scanExponent() {
+    if (this.pos >= this.source.length || (this.peek() !== 'e' && this.peek() !== 'E')) return;
+    const savedPos = this.pos;
+    const savedLine = this.line;
+    const savedCol = this.column;
+    this.advance(); // e/E
+    if (this.pos < this.source.length && (this.peek() === '+' || this.peek() === '-')) {
+      this.advance();
+    }
     if (this.pos < this.source.length && isDigit(this.peek())) {
-      while (this.pos < this.source.length && isDigit(this.peek())) {
-        this.advance();
-      }
-      // Check for real part
-      if (this.pos < this.source.length && this.peek() === '.' && this.pos + 1 < this.source.length && isDigit(this.peek(1))) {
-        this.advance(); // .
-        while (this.pos < this.source.length && isDigit(this.peek())) {
-          this.advance();
-        }
-      }
-      // Check for exponent
-      if (this.pos < this.source.length && (this.peek() === 'e' || this.peek() === 'E')) {
-        this.advance();
-        if (this.pos < this.source.length && (this.peek() === '+' || this.peek() === '-')) {
-          this.advance();
-        }
-        while (this.pos < this.source.length && isDigit(this.peek())) {
-          this.advance();
-        }
-      }
-    } else if (this.pos < this.source.length && isIdStart(this.peek())) {
-      // Could be TRUE/FALSE for BOOL#TRUE
-      while (this.pos < this.source.length && isIdPart(this.peek())) {
-        this.advance();
-      }
+      this.scanDigits(isDigit);
+      return;
     }
-
-    // Also handle hex: 16#FF typed as BYTE#16#FF — consume base prefix and digits
-    if (this.pos < this.source.length && this.peek() === '#') {
-      this.advance(); // second #
-      while (this.pos < this.source.length && isHexDigit(this.peek())) {
-        this.advance();
-      }
-    }
-
-    const raw = this.source.slice(start, this.pos);
-    return this.makeToken(TokenType.INTEGER_LITERAL, raw, start, this.pos);
+    this.pos = savedPos;
+    this.line = savedLine;
+    this.column = savedCol;
   }
 
   // ─── Number ─────────────────────────────────────────────────────────────────
@@ -633,3 +707,4 @@ class Lexer {
 }
 
 module.exports = Lexer;
+module.exports.TYPED_LITERAL_TYPES = TYPED_LITERAL_TYPES;

@@ -108,15 +108,27 @@ describe('Validator', () => {
   });
 
   describe('type compatibility', () => {
-    test('no warnings for compatible numeric types', () => {
+    test('no diagnostics for an implicit widening assignment', () => {
+      const { errors } = validateSource(`
+        PROGRAM P
+          VAR x: INT; y: DINT; END_VAR
+          y := x;
+        END_PROGRAM
+      `);
+      expect(errors).toHaveLength(0);
+    });
+
+    test('a narrowing assignment is an error', () => {
       const { errors } = validateSource(`
         PROGRAM P
           VAR x: INT; y: DINT; END_VAR
           x := y;
         END_PROGRAM
       `);
-      const w = warnings(errors).filter(e => e.message.includes('incompatible'));
-      expect(w).toHaveLength(0);
+      const errs = realErrors(errors);
+      expect(errs).toHaveLength(1);
+      expect(errs[0].message).toMatch(/DINT/);
+      expect(errs[0].message).toMatch(/INT/);
     });
   });
 
@@ -252,16 +264,16 @@ describe('Validator', () => {
     });
   });
 
-  describe('IF condition type warning', () => {
-    test('non-BOOL IF condition produces warning', () => {
+  describe('IF condition type check', () => {
+    test('non-BOOL IF condition is an error', () => {
       const { errors } = validateSource(`
         PROGRAM P
           VAR x: INT; END_VAR
           IF x THEN x := 1; END_IF
         END_PROGRAM
       `);
-      const w = warnings(errors);
-      expect(w.some(e => e.message.includes('BOOL'))).toBe(true);
+      const errs = realErrors(errors);
+      expect(errs.some(e => e.message.includes('BOOL'))).toBe(true);
     });
   });
 

@@ -142,15 +142,52 @@ describe('Codegen', () => {
     });
   });
 
-  describe('integer clamping', () => {
-    test('integer assignment uses | 0', () => {
+  describe('integer wrapping', () => {
+    test('INT assignment wraps to 16 bits', () => {
       const code = getCode(`
         PROGRAM P
           VAR x: INT; y: INT; END_VAR
           x := y + 1;
         END_PROGRAM
       `);
-      expect(code).toContain('| 0');
+      expect(code).toContain('x = ((y + 1) << 16) >> 16;');
+    });
+
+    test('DINT assignment wraps with | 0', () => {
+      const code = getCode(`
+        PROGRAM P
+          VAR x: DINT; y: DINT; END_VAR
+          x := y + 1;
+        END_PROGRAM
+      `);
+      expect(code).toContain('x = (y + 1) | 0;');
+    });
+
+    test('function return value wraps at the return type width', () => {
+      const code = getCode(`
+        FUNCTION Foo: SINT
+          VAR_INPUT x: SINT; END_VAR
+          Foo := x + 1;
+        END_FUNCTION
+      `);
+      expect(code).toContain('_result = ((x + 1) << 24) >> 24;');
+    });
+
+    test('CASE with identifier range bounds lowers to an if-chain', () => {
+      const code = getCode(`
+        PROGRAM P
+          VAR x: INT; lo: INT; hi: INT; y: INT; END_VAR
+          CASE x OF
+            1: y := 1;
+            lo..hi: y := 2;
+          ELSE y := 0;
+          END_CASE
+        END_PROGRAM
+      `);
+      expect(code).toContain('const __st_case0 = x;');
+      expect(code).toContain('if (__st_case0 === 1) {');
+      expect(code).toContain('} else if ((__st_case0 >= lo && __st_case0 <= hi)) {');
+      expect(code).toContain('} else {');
     });
   });
 

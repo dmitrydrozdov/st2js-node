@@ -1,6 +1,10 @@
 'use strict';
 
-const { parse, validate, compile, compileSync, parseAlgorithm, compileAlgorithm } = require('../../src/index');
+const {
+  parse, validate, compile, compileSync,
+  parseAlgorithm, compileAlgorithm, analyzeAlgorithm,
+  parseExpression, compileExpression, analyzeExpression,
+} = require('../../src/index');
 
 describe('Public API', () => {
   describe('parse()', () => {
@@ -185,6 +189,142 @@ describe('Public API', () => {
       expect(result.inputNames).toEqual(['a']);
       expect(result.outputNames).toEqual(['b']);
       expect(result.internalNames).toEqual(['c']);
+    });
+  });
+
+  describe('analyzeAlgorithm()', () => {
+    const vars = [
+      { name: 'CI', type: 'INT', direction: 'input' },
+      { name: 'CV', type: 'INT', direction: 'output' },
+    ];
+
+    test('analyzes source text and returns an annotated tree', () => {
+      const result = analyzeAlgorithm('CV := CI + 1;', vars);
+      expect(result.ast).not.toBeNull();
+      expect(result.errors.filter(e => e.severity === 'error')).toHaveLength(0);
+      expect(Array.isArray(result.warnings)).toBe(true);
+      const assign = result.ast.statements[0];
+      expect(assign.value.resolvedType).toBe('INT');
+      expect(assign.target.resolvedType).toBe('INT');
+      expect(assign.target.resolvedSymbol.name).toBe('CV');
+      expect(assign.value.right.constant).toEqual({ type: 'INT', value: 1n });
+    });
+
+    test('analyzes a parsed tree in place and returns the same object', () => {
+      const { ast } = parseAlgorithm('CV := CI + 1;');
+      const result = analyzeAlgorithm(ast, vars);
+      expect(result.ast).toBe(ast);
+      expect(ast.statements[0].value.resolvedType).toBe('INT');
+    });
+
+    test('returns null ast and parser errors when parsing fails', () => {
+      const result = analyzeAlgorithm('CV := ;', vars);
+      expect(result.ast).toBeNull();
+      expect(result.errors.some(e => e.phase === 'parser')).toBe(true);
+      expect(result.warnings).toEqual([]);
+    });
+
+    test('rejects a non-array descriptor list and a non-source input', () => {
+      expect(analyzeAlgorithm('CV := 1;', null).errors[0].phase).toBe('validator');
+      expect(analyzeAlgorithm(42, vars).errors[0].phase).toBe('parser');
+      expect(analyzeAlgorithm(42, vars).ast).toBeNull();
+    });
+
+    test('type violations are errors regardless of options', () => {
+      const result = analyzeAlgorithm('CV := 1.5;', vars, { strict: false });
+      expect(result.errors.some(e => e.severity === 'error' && e.phase === 'validator')).toBe(true);
+    });
+
+    test('strict promotes warnings to errors', () => {
+      const lenient = analyzeAlgorithm('CV := Missing;', vars);
+      expect(lenient.errors).toHaveLength(0);
+      expect(lenient.warnings).toHaveLength(1);
+      const strict = analyzeAlgorithm('CV := Missing;', vars, { strict: true });
+      expect(strict.errors).toHaveLength(1);
+      expect(strict.errors[0].severity).toBe('error');
+    });
+
+    test('compileAlgorithm reports the same diagnostics as analyzeAlgorithm', () => {
+      for (const [src, opts] of [
+        ['CV := CI + Missing;', {}],
+        ['CV := CI + Missing;', { strict: true }],
+        ['CV := 1.5;', {}],
+        ['CV := CI;', {}],
+        ['CV := ;', {}],
+      ]) {
+        const a = analyzeAlgorithm(src, vars, opts);
+        const c = compileAlgorithm(src, vars, opts);
+        expect(c.errors).toEqual(a.errors);
+        expect(c.warnings).toEqual(a.warnings);
+      }
+    });
+
+    test('compile results keep their shape', () => {
+      const result = compileAlgorithm('CV := CI + 1;', vars);
+      expect(Object.keys(result).sort()).toEqual(['code', 'errors', 'inputNames', 'internalNames', 'outputNames', 'warnings']);
+      expect(typeof result.code).toBe('string');
+      expect(result.inputNames).toEqual(['CI']);
+      expect(result.outputNames).toEqual(['CV']);
+      expect(result.internalNames).toEqual([]);
+    });
+  });
+
+  describe('analyzeExpression()', () => {
+    const vars = [
+      { name: 'REQ', type: 'BOOL', direction: 'input' },
+      { name: 'count', type: 'INT', direction: 'input' },
+      { name: 'threshold', type: 'INT', direction: 'input' },
+    ];
+
+    test('annotates a parsed tree in place', () => {
+      const { ast } = parseExpression('REQ AND count < threshold');
+      const result = analyzeExpression(ast, vars);
+      expect(result.ast).toBe(ast);
+      expect(ast.resolvedType).toBe('BOOL');
+      expect(ast.right.left.resolvedType).toBe('INT');
+      expect(result.errors).toHaveLength(0);
+    });
+
+    test('analyzes source text', () => {
+      const result = analyzeExpression('count + 1', vars);
+      expect(result.ast.resolvedType).toBe('INT');
+      expect(result.ast.right.constant).toEqual({ type: 'INT', value: 1n });
+    });
+
+    test('undeclared identifiers are errors', () => {
+      const result = analyzeExpression('Missing > 0', []);
+      expect(result.errors.some(e => e.severity === 'error' && /Missing/.test(e.message))).toBe(true);
+    });
+
+    test('compileExpression reports the same diagnostics as analyzeExpression', () => {
+      for (const src of ['REQ AND count < threshold', 'count < REQ', 'Missing', 'count +']) {
+        const a = analyzeExpression(src, vars);
+        const c = compileExpression(src, vars);
+        expect(c.errors).toEqual(a.errors);
+        expect(c.warnings).toEqual(a.warnings);
+      }
+    });
+
+    test('compile results keep their shape', () => {
+      const result = compileExpression('count < threshold', vars);
+      expect(Object.keys(result).sort()).toEqual(['code', 'errors', 'inputNames', 'internalNames', 'outputNames', 'warnings']);
+      expect(result.code).toBe('(__s["count"] < __s["threshold"])');
+    });
+  });
+
+  describe('validate() uses the typing pass', () => {
+    test('annotates the POU tree and reports type errors', () => {
+      const { ast } = parse(`
+        PROGRAM P
+          VAR x: INT; r: REAL; END_VAR
+          x := x + 1;
+          x := r;
+        END_PROGRAM
+      `);
+      const result = validate(ast);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => /real to integer/.test(e.message))).toBe(true);
+      expect(ast.declarations[0].body[0].value.resolvedType).toBe('INT');
     });
   });
 });
